@@ -232,7 +232,7 @@ static inline void fn_log_print(
 
 #define log_print_if(predicate, severity, msg...)                          \
     do {                                                                   \
-        if ((predicate)) {                                                \
+        if ((predicate)) {                                                 \
             fn_log_print(severity, __FILE__, __LINE__, __FUNCTION__, msg); \
             LOG_BREAKPOINT;                                                \
         }                                                                  \
@@ -793,13 +793,9 @@ static inline double ascii_to_double(const char *data) {
 ////////////////////////////////////////////////////////////////////////////////
 // allocator.h
 
-#ifdef SOL_ALLOC
-#define SOL_DO_NOT_USE_STD_ALLOCATOR
-#endif
-
 /*
-    Not implementing the allocator for now. Just adding a define thing for stuff that does use the
-    allocator, i.e. #ifdef SOL_STD_ALLOC { assume allocator arg is null and use malloc }
+    Code that would normally use an allocator uses the standard allocator
+    #ifndef SOL_ALLOC. In this case, any 'allocator*' arg can be passed as NULL.
 */
 
 #define ALLOCATOR_ALIGNMENT 16
@@ -850,7 +846,7 @@ struct allocator {
     };
 };
 
-#ifdef SOL_DO_NOT_USE_STD_ALLOCATOR
+#ifdef SOL_ALLOC
 // Leave 'buffer' null to allocate cap from standard allocator.
 allocator new_allocator(size_t cap, void *buffer, allocator_flag_bits type);
 void free_allocator(allocator *alloc);
@@ -863,7 +859,7 @@ static inline void free_allocator(allocator *alloc) {}
 #define new_linear_allocator(cap, buffer) new_allocator(cap, buffer, ALLOCATOR_LINEAR_BIT)
 
 static inline void *allocate(allocator *alloc, size_t size) {
-#ifdef SOL_DO_NOT_USE_STD_ALLOCATOR
+#ifdef SOL_ALLOC
     return alloc->fpn_allocate(alloc, size);
 #else
     return malloc(size);
@@ -871,7 +867,7 @@ static inline void *allocate(allocator *alloc, size_t size) {
 }
 
 static inline void *reallocate(allocator *alloc, void *ptr, size_t new_size) {
-#ifdef SOL_DO_NOT_USE_STD_ALLOCATOR
+#ifdef SOL_ALLOC
     return alloc->fpn_reallocate(alloc, ptr, new_size);
 #else
     return realloc(ptr, new_size);
@@ -879,7 +875,7 @@ static inline void *reallocate(allocator *alloc, void *ptr, size_t new_size) {
 }
 
 static inline void *reallocate_with_old_size(allocator *alloc, void *ptr, size_t old_size, size_t new_size) {
-#ifdef SOL_DO_NOT_USE_STD_ALLOCATOR
+#ifdef SOL_ALLOC
     return alloc->fpn_reallocate_with_old_size(alloc, ptr, old_size, new_size);
 #else
     return realloc(ptr, new_size);
@@ -887,7 +883,7 @@ static inline void *reallocate_with_old_size(allocator *alloc, void *ptr, size_t
 }
 
 static inline void deallocate(allocator *alloc, void *ptr) {
-#ifdef SOL_DO_NOT_USE_STD_ALLOCATOR
+#ifdef SOL_ALLOC
     return alloc->fpn_deallocate(alloc, ptr);
 #else
     return free(ptr);
@@ -895,7 +891,7 @@ static inline void deallocate(allocator *alloc, void *ptr) {
 }
 
 static inline void *allocate_thread_safe(allocator *alloc, size_t size) {
-#ifdef SOL_DO_NOT_USE_STD_ALLOCATOR
+#ifdef SOL_ALLOC
     return alloc->fpn_allocate_thread_safe(alloc, size);
 #else
     return malloc(size);
@@ -903,7 +899,7 @@ static inline void *allocate_thread_safe(allocator *alloc, size_t size) {
 }
 
 static inline void *reallocate_thread_safe(allocator *alloc, void *ptr, size_t size) {
-#ifdef SOL_DO_NOT_USE_STD_ALLOCATOR
+#ifdef SOL_ALLOC
     return alloc->fpn_reallocate_thread_safe(alloc, ptr, size);
 #else
     return realloc(ptr, size);
@@ -911,7 +907,7 @@ static inline void *reallocate_thread_safe(allocator *alloc, void *ptr, size_t s
 }
 
 static inline void deallocate_thread_safe(allocator *alloc, void *ptr) {
-#ifdef SOL_DO_NOT_USE_STD_ALLOCATOR
+#ifdef SOL_ALLOC
     return alloc->fpn_deallocate_thread_safe(alloc, ptr);
 #else
     return free(ptr);
@@ -2390,7 +2386,7 @@ struct dir getdir(const char *name, allocator *alloc)
 ////////////////////////////////////////////////////////////////////////////////
 // allocator.c
 
-#ifdef SOL_DO_NOT_USE_STD_ALLOCATOR
+#ifdef SOL_ALLOC
 
 static heap_allocator fn_new_heap_allocator(uint64 cap, void *buffer);
 static linear_allocator fn_new_linear_allocator(uint64 cap, void *buffer);
