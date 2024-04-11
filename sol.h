@@ -11,9 +11,11 @@
 #include <immintrin.h>
 #include <time.h>
 #include <errno.h>
-
 #include <unistd.h>
+#include <dirent.h>
+
 #include <sys/stat.h>
+#include <sys/types.h>
 
 #define SOL_THREAD
 
@@ -1133,15 +1135,33 @@ static inline void sb_replace_uint(string_builder *sb, uint i, int u)
     memcpy(sb->data+sb->used,nb,nl);
 }
 
+enum {
+    STRING_BUFFER_REALLOCATE_BIT = 0x01,
+    // if a string buffer reallocates, strings using it will be invalidated;
+    // sometimes this is fine, as perhaps the buffer is being grown before
+    // strings are directed to it, but being able to control this behaviour
+    // is useful.
+};
+
 typedef struct {
+    uint flags;
     char *data;
     uint64_t used;
     uint64_t cap;
     allocator *alloc;
 } string_buffer;
 
-string_buffer new_string_buffer(uint64 cap, allocator *alloc);
+string_buffer new_string_buffer(uint64 cap, uint flags, allocator *alloc);
 void free_string_buffer(string_buffer *buf);
+
+static inline string_buffer new_dyn_string_buffer(uint64 cap, allocator *alloc)
+{
+    return new_string_buffer(cap, STRING_BUFFER_REALLOCATE_BIT, alloc);
+}
+static inline string_buffer new_static_string_buffer(uint64 cap, allocator *alloc)
+{
+    return new_string_buffer(cap, 0x0, alloc);
+}
 
 string string_buffer_get_string(string_buffer *buf, string *str);
 string string_buffer_get_string_from_cstring(string_buffer *buf, const char *cstr);
@@ -1154,8 +1174,16 @@ struct file {
     size_t size;
 };
 
+struct dir {
+    uint fc;
+    uint dc;
+    string *f; // file names
+    string *d; // dir names
+    string_buffer b; // name buffer
+};
+
 // @Note breaks on windows?
-static inline uint get_dir(const char *file_name, char *buf) {
+static inline uint get_file_parent_dir(const char *file_name, char *buf) {
     int p = 0;
     int len = strlen(file_name);
     for(uint i = 0; i < len; ++i) {
@@ -1189,6 +1217,8 @@ void file_write_bin(const char *file_name, size_t size, const void *data);
 void file_write_char(const char *file_name, size_t count, const char *data);
 void file_append_bin(const char *file_name, size_t size, const void *data);
 void file_append_char(const char *file_name, size_t count, const char *data);
+
+struct dir getdir(const char *name, allocator *alloc);
 
 ////////////////////////////////////////////////////////////////////////////////
 // array.h
@@ -2306,6 +2336,57 @@ void file_append_char(const char *file_name, size_t count, const char *data)
     fclose(f);
 }
 
+struct dir getdir(const char *name, allocator *alloc)
+{
+    if (!name) {
+        log_print_error("passing null argument 'name' to getdir()");
+        return (struct dir){};
+    }
+
+    struct dir ret = {};
+    ret.b = new_dyn_string_buffer(1024, alloc);
+
+    DIR *d = opendir(name);
+
+    uint *ofs = new_array(128, *ofs, alloc);
+    uchar *types = new_array(128, *types, alloc);
+
+    struct dirent *de;
+    while((de = readdir(d))) {
+        if ((memcmp(de->d_name, ".", 1) && memcmp(de->d_name, "..", 2)) &&
+            (de->d_type == DT_REG || de->d_type ==  DT_DIR))
+        {
+            string_buffer_get_string_from_cstring(&ret.b, de->d_name);
+            array_add(ofs, ret.b.used);
+            array_add(types, de->d_type);
+        }
+        ret.fc += de->d_type == DT_REG;
+        ret.dc += de->d_type == DT_DIR;
+    }
+    ret.f = sallocate(alloc, *ret.f, ret.fc);
+    ret.d = sallocate(alloc, *ret.d, ret.dc);
+    ret.fc = 0;
+    ret.dc = 0;
+
+    uint tmp = 0;
+    for(uint i = 0; i < array_len(types); ++i) {
+        ret.f[ret.fc].cstr = ret.b.data + tmp;
+        ret.d[ret.dc].cstr = ret.b.data + tmp;
+
+        // string.len should not include null byte
+        ret.f[ret.fc].len = (ofs[i] - tmp) - 1;
+        ret.d[ret.dc].len = (ofs[i] - tmp) - 1;
+
+        ret.fc += types[i] == DT_REG;
+        ret.dc += types[i] == DT_DIR;
+        tmp = ofs[i];
+    }
+
+    free_array(ofs);
+    free_array(types);
+    return ret;
+}
+
 ////////////////////////////////////////////////////////////////////////////////
 // allocator.c
 
@@ -2537,9 +2618,10 @@ static void free_allocation_linear_thread_safe(allocator *alloc, void *ptr) { /*
 
 static void realloc_string_buffer(string_buffer *buf, uint64 newsz);
 
-string_buffer new_string_buffer(uint64 cap, allocator *alloc)
+string_buffer new_string_buffer(uint64 cap, uint flags, allocator *alloc)
 {
     string_buffer ret;
+    ret.flags = flags;
     ret.used = 0;
     ret.cap = align(cap, 16);
     ret.data = allocate(alloc, ret.cap);
@@ -2554,10 +2636,20 @@ void free_string_buffer(string_buffer *buf)
     buf->used = 0;
 }
 
+// @Note The flags field and reallocation is different to my string_buffer
+// implementation elsewhere. It is useful for a thing I am currently working
+// on, and if it seems like something I would really use in more substantial
+// projects, I will clone it.
 string string_buffer_get_string(string_buffer *buf, string *str)
 {
-    if (buf->used + str->len + 1 > buf->cap)
-        realloc_string_buffer(buf, (buf->cap + str->len + 1) * 2);
+    if (buf->used + str->len + 1 > buf->cap) {
+        if(buf->flags & STRING_BUFFER_REALLOCATE_BIT) {
+            realloc_string_buffer(buf, (buf->cap + str->len + 1) * 2);
+        } else {
+            log_print_error("string_buffer overflow");
+            return (string){};
+        }
+    }
 
     memcpy(buf->data + buf->used, str->cstr, str->len);
     string ret;
@@ -2573,8 +2665,14 @@ string string_buffer_get_string(string_buffer *buf, string *str)
 string string_buffer_get_string_from_cstring(string_buffer *buf, const char *cstr)
 {
     uint64 len = strlen(cstr);
-    if (buf->used + len + 1 > buf->cap)
-        realloc_string_buffer(buf, (buf->cap + len + 1) * 2);
+    if (buf->used + len + 1 > buf->cap) {
+        if(buf->flags & STRING_BUFFER_REALLOCATE_BIT) {
+            realloc_string_buffer(buf, (buf->cap + len + 1) * 2);
+        } else {
+            log_print_error("string_buffer overflow");
+            return (string){};
+        }
+    }
 
     memcpy(buf->data + buf->used, cstr, len);
     string ret;
@@ -3091,7 +3189,7 @@ test_suite load_tests(allocator *alloc)
     test_suite ret = (test_suite){};
     ret.tests   = new_array(128, *ret.tests, alloc);
     ret.modules = new_array(128, *ret.modules, alloc);
-    ret.str_buf = new_string_buffer(1024, alloc);
+    ret.str_buf = new_static_string_buffer(1024, alloc);
     ret.alloc = alloc;
     return ret;
 }
