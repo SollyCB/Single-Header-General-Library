@@ -957,6 +957,93 @@ static inline void allocator_reset_linear_to(allocator *alloc, uint64 to) {
 }
 
 ////////////////////////////////////////////////////////////////////////////////
+// array.h
+
+#define ARRAY_METADATA_WIDTH 4
+#define ARRAY_METADATA_SIZE (sizeof(uint64) * ARRAY_METADATA_WIDTH)
+
+// Backend
+static inline void* fn_new_array(uint64 cap, uint64 width, allocator *alloc) {
+    uint64 *ret = allocate(alloc, cap * width + ARRAY_METADATA_SIZE);
+    ret[0] = width * cap;
+    ret[1] = 0;
+    ret[2] = width;
+    ret[3] = (uint64)alloc;
+    ret += ARRAY_METADATA_WIDTH;
+    assert(((uint64)ret % 16) == 0); // align for SIMD
+    return ret;
+}
+
+static inline void* fn_realloc_array(void *a) {
+    uint64 *array = (uint64*)a - ARRAY_METADATA_WIDTH;
+    if (array[0] <= array[1] * array[2]) {
+        array = reallocate_with_old_size((allocator*)(array[3]),
+                array, array[0] + ARRAY_METADATA_SIZE, array[0] * 2 + ARRAY_METADATA_SIZE);
+        assert(array);
+        array[0] *= 2;
+    }
+    assert(((uint64)(array + ARRAY_METADATA_WIDTH) % 16) == 0); // align for SIMD
+    return array + ARRAY_METADATA_WIDTH;
+}
+
+static inline size_t array_cap(void *array) {
+    return ((uint64*)array - 4)[0] / ((uint64*)array - 4)[2];
+}
+
+static inline size_t array_len(void *array) {
+    return ((uint64*)array - 4)[1];
+}
+
+static inline void array_set_len(void *array, size_t len) {
+    ((uint64*)array - 4)[1] = len;
+}
+
+static inline size_t array_elem_width(void *array)
+{
+    return ((uint64*)array-4)[2];
+}
+
+static inline size_t array_byte_len(void *a)
+{
+    return array_elem_width(a)*array_len(a);
+}
+
+static inline struct allocation array_allocation(void *a)
+{
+    struct allocation ret;
+    ret.size = array_byte_len(a)+ARRAY_METADATA_SIZE;
+    ret.data = (uint64*)a-4;
+    return ret;
+}
+
+static inline void array_inc(void *array) {
+   ((uint64*)array - 4)[1] += 1;
+}
+
+static inline void array_dec(void *array) {
+   ((uint64*)array - 4)[1] -= 1;
+}
+
+static inline void free_array(void *a) {
+    uint64 *array = (uint64*)a - 4;
+    allocator *alloc = (allocator*)(array[3]);
+    deallocate(alloc, array);
+}
+
+void* load_array(const char *fname, allocator *alloc);
+void store_array(const char *fname, void *a);
+
+// Frontend
+#define new_array(cap, type, alloc) fn_new_array(cap, sizeof(type), alloc)
+#define array_last(array) (array[array_len(array)-1])
+#define array_add(array, elem) \
+    do { \
+        array = fn_realloc_array(array); \
+        array[array_len(array)] = elem; \
+        array_inc(array); \
+    } while (0)
+
+////////////////////////////////////////////////////////////////////////////////
 // string.h
 
 typedef struct {
@@ -964,9 +1051,26 @@ typedef struct {
     uint64 len;
 } string;
 
-static inline string cstr_to_string(const char *cstr) {
-    return (string){cstr, strlen(cstr)};
-}
+enum {
+    STRING_BUFFER_REALLOCATE_BIT = 0x01,
+    // if a string buffer reallocates, strings using it will be invalidated;
+    // sometimes this is fine, as perhaps the buffer is being grown before
+    // strings are directed to it, but being able to control this behaviour
+    // is useful.
+};
+
+typedef struct {
+    uint flags;
+    char *data;
+    uint64_t used;
+    uint64_t cap;
+    allocator *alloc;
+} string_buffer;
+
+typedef struct string_array {
+    struct pair_uint *r; // dynamic array of string offsets and lengths
+    string_buffer b;
+} string_array;
 
 // **THIS SAME COMMENT APPLIES TO THE ABOVE 'string'**
 // Debating removing typedef. I used to more easily justify typedefs
@@ -978,6 +1082,63 @@ typedef struct {
     uint32 cap;
     char *data;
 } string_builder;
+
+static inline string cstr_to_string(const char *cstr)
+{
+    return (string){.cstr = cstr, .len = strlen(cstr)};
+}
+
+string_buffer new_string_buffer(uint64 cap, uint flags, allocator *alloc);
+void free_string_buffer(string_buffer *buf);
+
+static inline string_buffer new_dyn_string_buffer(uint64 cap, allocator *alloc)
+{
+    return new_string_buffer(cap, STRING_BUFFER_REALLOCATE_BIT, alloc);
+}
+static inline string_buffer new_static_string_buffer(uint64 cap, allocator *alloc)
+{
+    return new_string_buffer(cap, 0x0, alloc);
+}
+
+string string_buffer_get_string(string_buffer *buf, string *str);
+string string_buffer_get_string_from_cstring(string_buffer *buf, const char *cstr);
+
+static inline string_array new_string_array(uint initial_buffer_size, uint initial_array_len, allocator *alloc)
+{
+    string_array ret;
+    ret.r = new_array(initial_array_len, *ret.r, alloc);
+    ret.b = new_dyn_string_buffer(initial_buffer_size, alloc);
+    return ret;
+}
+
+static inline void string_array_add(string_array *arr, string *str)
+{
+    string_buffer_get_string(&arr->b, str);
+    struct pair_uint r = { // +-1 for null byte
+        .x = arr->b.used - (str->len+1),
+        .y = str->len,
+    };
+    array_add(arr->r, r);
+}
+
+static inline void string_array_add_cstr(string_array *arr, const char *cstr)
+{
+    string_buffer_get_string_from_cstring(&arr->b, cstr);
+    uint len = strlen(cstr);
+    struct pair_uint r = { // +-1 for null byte
+        .x = arr->b.used - (len+1),
+        .y = len,
+    };
+    array_add(arr->r, r);
+}
+
+static inline string string_array_get_string(string_array *arr, uint i)
+{
+    return (string){
+        .cstr = arr->b.data + arr->r[i].x,
+        .len = arr->r[i].y,
+    };
+}
 
 static inline string_builder sb_new(uint32 size, char *data)
 {
@@ -1146,37 +1307,6 @@ static inline void sb_replace_uint(string_builder *sb, uint i, int u)
     memcpy(sb->data+sb->used,nb,nl);
 }
 
-enum {
-    STRING_BUFFER_REALLOCATE_BIT = 0x01,
-    // if a string buffer reallocates, strings using it will be invalidated;
-    // sometimes this is fine, as perhaps the buffer is being grown before
-    // strings are directed to it, but being able to control this behaviour
-    // is useful.
-};
-
-typedef struct {
-    uint flags;
-    char *data;
-    uint64_t used;
-    uint64_t cap;
-    allocator *alloc;
-} string_buffer;
-
-string_buffer new_string_buffer(uint64 cap, uint flags, allocator *alloc);
-void free_string_buffer(string_buffer *buf);
-
-static inline string_buffer new_dyn_string_buffer(uint64 cap, allocator *alloc)
-{
-    return new_string_buffer(cap, STRING_BUFFER_REALLOCATE_BIT, alloc);
-}
-static inline string_buffer new_static_string_buffer(uint64 cap, allocator *alloc)
-{
-    return new_string_buffer(cap, 0x0, alloc);
-}
-
-string string_buffer_get_string(string_buffer *buf, string *str);
-string string_buffer_get_string_from_cstring(string_buffer *buf, const char *cstr);
-
 ////////////////////////////////////////////////////////////////////////////////
 // file.h
 
@@ -1230,107 +1360,6 @@ void file_append_bin(const char *file_name, size_t size, const void *data);
 void file_append_char(const char *file_name, size_t count, const char *data);
 
 struct dir getdir(const char *name, allocator *alloc);
-
-////////////////////////////////////////////////////////////////////////////////
-// array.h
-#define ARRAY_METADATA_WIDTH 4
-#define ARRAY_METADATA_SIZE (sizeof(uint64) * ARRAY_METADATA_WIDTH)
-
-// Backend
-static inline void* fn_new_array(uint64 cap, uint64 width, allocator *alloc) {
-    uint64 *ret = allocate(alloc, cap * width + ARRAY_METADATA_SIZE);
-    ret[0] = width * cap;
-    ret[1] = 0;
-    ret[2] = width;
-    ret[3] = (uint64)alloc;
-    ret += ARRAY_METADATA_WIDTH;
-    assert(((uint64)ret % 16) == 0); // align for SIMD
-    return ret;
-}
-
-static inline void* fn_realloc_array(void *a) {
-    uint64 *array = (uint64*)a - ARRAY_METADATA_WIDTH;
-    if (array[0] <= array[1] * array[2]) {
-        array = reallocate_with_old_size((allocator*)(array[3]),
-                array, array[0] + ARRAY_METADATA_SIZE, array[0] * 2 + ARRAY_METADATA_SIZE);
-        assert(array);
-        array[0] *= 2;
-    }
-    assert(((uint64)(array + ARRAY_METADATA_WIDTH) % 16) == 0); // align for SIMD
-    return array + ARRAY_METADATA_WIDTH;
-}
-
-static inline size_t array_cap(void *array) {
-    return ((uint64*)array - 4)[0] / ((uint64*)array - 4)[2];
-}
-
-static inline size_t array_len(void *array) {
-    return ((uint64*)array - 4)[1];
-}
-
-static inline void array_set_len(void *array, size_t len) {
-    ((uint64*)array - 4)[1] = len;
-}
-
-static inline size_t array_elem_width(void *array)
-{
-    return ((uint64*)array-4)[2];
-}
-
-static inline size_t array_byte_len(void *a)
-{
-    return array_elem_width(a)*array_len(a);
-}
-
-static inline struct allocation array_allocation(void *a)
-{
-    struct allocation ret;
-    ret.size = array_byte_len(a)+ARRAY_METADATA_SIZE;
-    ret.data = (uint64*)a-4;
-    return ret;
-}
-
-static inline void array_inc(void *array) {
-   ((uint64*)array - 4)[1] += 1;
-}
-
-static inline void array_dec(void *array) {
-   ((uint64*)array - 4)[1] -= 1;
-}
-
-static inline void free_array(void *a) {
-    uint64 *array = (uint64*)a - 4;
-    allocator *alloc = (allocator*)(array[3]);
-    deallocate(alloc, array);
-}
-
-static inline void* load_array(const char *fname, allocator *alloc)
-{
-    struct file f = file_read_bin_all(fname,alloc);
-    uint64 *ret = (uint64*)f.data;
-    ret[3] = (uint64)alloc;
-    ret += ARRAY_METADATA_WIDTH;
-    assert(((uint64)ret % 16) == 0); // align for SIMD
-    return ret;
-}
-
-static inline void store_array(const char *fname, void *a)
-{
-    FILE *f = fopen(fname,"wb");
-    struct allocation alloc = array_allocation(a);
-    fwrite(alloc.data,1,alloc.size,f);
-    fclose(f);
-}
-
-// Frontend
-#define new_array(cap, type, alloc) fn_new_array(cap, sizeof(type), alloc)
-#define array_last(array) (array[array_len(array)-1])
-#define array_add(array, elem) \
-    do { \
-        array = fn_realloc_array(array); \
-        array[array_len(array)] = elem; \
-        array_inc(array); \
-    } while (0)
 
 ////////////////////////////////////////////////////////////////////////////////
 // hashmap.h
@@ -2623,6 +2652,27 @@ static void free_allocation_heap_thread_safe(allocator *alloc, void *ptr)
 static void free_allocation_linear_thread_safe(allocator *alloc, void *ptr) { /* Do nothing */ }
 
 #endif
+
+//////////////////////////////////////////////////////////////
+// array.c
+
+void* load_array(const char *fname, allocator *alloc)
+{
+    struct file f = file_read_bin_all(fname,alloc);
+    uint64 *ret = (uint64*)f.data;
+    ret[3] = (uint64)alloc;
+    ret += ARRAY_METADATA_WIDTH;
+    assert(((uint64)ret % 16) == 0); // align for SIMD
+    return ret;
+}
+
+void store_array(const char *fname, void *a)
+{
+    FILE *f = fopen(fname,"wb");
+    struct allocation alloc = array_allocation(a);
+    fwrite(alloc.data,1,alloc.size,f);
+    fclose(f);
+}
 
 //////////////////////////////////////////////////////////////
 // string.c
