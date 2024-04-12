@@ -1111,6 +1111,11 @@ static inline string_array new_string_array(uint initial_buffer_size, uint initi
     return ret;
 }
 
+static inline uint string_array_len(string_array *arr)
+{
+    return array_len(arr->r);
+}
+
 static inline void string_array_add(string_array *arr, string *str)
 {
     string_buffer_get_string(&arr->b, str);
@@ -1138,6 +1143,30 @@ static inline string string_array_get_string(string_array *arr, uint i)
         .cstr = arr->b.data + arr->r[i].x,
         .len = arr->r[i].y,
     };
+}
+
+static inline string_array string_split(string *str, char split_char, allocator *alloc)
+{
+    string_array ret = new_string_array(str->len + (str->len>>3), str->len>>3, alloc);
+    string tmp;
+    uint pos = 0;
+    uint inc;
+    while(1) {
+        tmp.cstr = str->cstr + pos;
+        tmp.len = pos;
+
+        inc = simd_find_char_with_len(str->len - pos, str->cstr + pos, split_char);
+
+        if (inc == Max_u32)
+            break;
+
+        pos += inc;
+        tmp.len = pos - tmp.len;
+        string_array_add(&ret, &tmp);
+
+        pos++;
+    }
+    return ret;
 }
 
 static inline string_builder sb_new(uint32 size, char *data)
@@ -1316,11 +1345,8 @@ struct file {
 };
 
 struct dir {
-    uint fc;
-    uint dc;
-    string *f; // file names
-    string *d; // dir names
-    string_buffer b; // name buffer
+    string_array f; // files
+    string_array d; // directories
 };
 
 // @Note breaks on windows?
@@ -2383,47 +2409,21 @@ struct dir getdir(const char *name, allocator *alloc)
         return (struct dir){};
     }
 
-    struct dir ret = {};
-    ret.b = new_dyn_string_buffer(1024, alloc);
+    struct dir ret = {
+        .f = new_string_array(128, 16, alloc),
+        .d = new_string_array(64, 8, alloc),
+    };
 
     DIR *d = opendir(name);
 
-    uint *ofs = new_array(128, *ofs, alloc);
-    uchar *types = new_array(128, *types, alloc);
-
     struct dirent *de;
-    while((de = readdir(d))) {
-        if ((memcmp(de->d_name, ".", 1) && memcmp(de->d_name, "..", 2)) &&
-            (de->d_type == DT_REG || de->d_type ==  DT_DIR))
-        {
-            string_buffer_get_string_from_cstring(&ret.b, de->d_name);
-            array_add(ofs, ret.b.used);
-            array_add(types, de->d_type);
+    while((de = readdir(d)))
+        if (memcmp(de->d_name, ".", 1) && memcmp(de->d_name, "..", 2)) {
+            if (de->d_type == DT_REG)
+                string_array_add_cstr(&ret.f, de->d_name);
+            else if (de->d_type == DT_DIR)
+                string_array_add_cstr(&ret.d, de->d_name);
         }
-        ret.fc += de->d_type == DT_REG;
-        ret.dc += de->d_type == DT_DIR;
-    }
-    ret.f = sallocate(alloc, *ret.f, ret.fc);
-    ret.d = sallocate(alloc, *ret.d, ret.dc);
-    ret.fc = 0;
-    ret.dc = 0;
-
-    uint tmp = 0;
-    for(uint i = 0; i < array_len(types); ++i) {
-        ret.f[ret.fc].cstr = ret.b.data + tmp;
-        ret.d[ret.dc].cstr = ret.b.data + tmp;
-
-        // string.len should not include null byte
-        ret.f[ret.fc].len = (ofs[i] - tmp) - 1;
-        ret.d[ret.dc].len = (ofs[i] - tmp) - 1;
-
-        ret.fc += types[i] == DT_REG;
-        ret.dc += types[i] == DT_DIR;
-        tmp = ofs[i];
-    }
-
-    free_array(ofs);
-    free_array(types);
     return ret;
 }
 
