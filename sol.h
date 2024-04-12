@@ -562,6 +562,21 @@ static inline uint32 simd_find_char(const char *data, char c) {
     return i + ctz16(m0) - 16;
 }
 
+static inline uint32 simd_find_char_with_len(uint len, const char *data, char c) {
+    __m128i a;
+    __m128i b = _mm_set1_epi8(c);
+    uint16 m0 = 0;
+    uint32 i;
+    for(i = 0; !m0; i += 16) {
+        if (i >= len)
+            return Max_u32;
+        a = _mm_loadu_si128((__m128i*)(data + i));
+        a = _mm_cmpeq_epi8(a, b);
+        m0 = _mm_movemask_epi8(a);
+    }
+    return i + ctz16(m0) - 16;
+}
+
 static inline uint32 simd_find_number_char(const char *data) {
     __m128i a;
     __m128i b = _mm_set1_epi8('0' - 1);
