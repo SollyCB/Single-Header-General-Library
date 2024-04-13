@@ -303,20 +303,6 @@ static inline uint32 clear_bit_idx(uint32 mask, uint i) {
     return mask & ~(1 << i);
 }
 
-static inline struct timespec get_time_cpu_proc() {
-    struct timespec ts;
-    int ok = clock_gettime(CLOCK_PROCESS_CPUTIME_ID, &ts);
-    log_print_error_if(ok == (clock_t)-1, "failed to get time");
-    return ts;
-}
-
-static inline struct timespec get_time_cpu_thread() {
-    struct timespec ts;
-    int ok = clock_gettime(CLOCK_THREAD_CPUTIME_ID, &ts);
-    log_print_error_if(ok == (clock_t)-1, "failed to get time");
-    return ts;
-}
-
 // This function is useful sometimes, such as for low level string building,
 // but I cannot think of a decent name. I use copied as in "copied <size> bytes",
 // but that is weak...
@@ -1011,6 +997,11 @@ static inline void array_set_len(void *array, size_t len) {
     ((uint64*)array - 4)[1] = len;
 }
 
+static inline void reset_array(void *array)
+{
+    array_set_len(array, 0);
+}
+
 static inline size_t array_elem_width(void *array)
 {
     return ((uint64*)array-4)[2];
@@ -1139,6 +1130,11 @@ static inline string_buffer new_static_strbuf(uint64 cap, allocator *alloc)
 string strbuf_add(string_buffer *buf, string *str);
 string strbuf_add_cstr(string_buffer *buf, const char *cstr);
 
+static inline void reset_strbuf(string_buffer *b)
+{
+    b->used = 0;
+}
+
 static inline string_array new_strarr(uint initial_buffer_size, uint initial_array_len,
                                       allocator *alloc)
 {
@@ -1146,6 +1142,12 @@ static inline string_array new_strarr(uint initial_buffer_size, uint initial_arr
     ret.r = new_array(initial_array_len, *ret.r, alloc);
     ret.b = new_dyn_strbuf(initial_buffer_size, alloc);
     return ret;
+}
+
+static inline void free_strarr(string_array *sa)
+{
+    free_strbuf(&sa->b);
+    free_array(sa->r);
 }
 
 static inline uint strarr_len(string_array *arr)
@@ -1182,6 +1184,12 @@ static inline string strarr_get(string_array *arr, uint i)
     };
 }
 
+static inline void reset_strarr(string_array *arr)
+{
+    reset_array(arr->r);
+    reset_strbuf(&arr->b);
+}
+
 string_array str_split(string *str, char split_char, allocator *alloc);
 
 // @Note Although one can argue that 'sb_' prefix clashes with string_buffer,
@@ -1192,6 +1200,12 @@ string_array str_split(string *str, char split_char, allocator *alloc);
 static inline string_builder sb_new(uint32 size, char *data)
 {
     return (string_builder){0, size, data};
+}
+
+static inline void sb_inc(string_builder *sb, uint sz)
+{
+    assert(sb->used + sz <= sb->cap);
+    sb->used += sz;
 }
 
 static inline void sb_null_term(string_builder *sb)
@@ -1793,7 +1807,7 @@ static inline void* fn_hash_map_delete_str(hash_map *map, const char* key) {
 #endif
 
 
-typedef struct {
+typedef struct thread_work {
     uint id;
     allocator *alloc_heap;
     allocator *alloc_temp;
@@ -1810,7 +1824,7 @@ typedef enum {
 
 #define vol volatile // @Test without this.
 
-typedef struct {
+typedef struct thread_work_queue {
     uint tail;
     uint head;
     mutex *lock;
@@ -1818,13 +1832,13 @@ typedef struct {
     allocator *alloc;
 } thread_work_queue;
 
-typedef struct {
+typedef struct thread_shutdown_info {
     uint64 work_items_completed;
     uint64 time_working; // milliseconds
     uint64 time_paused; // milliseconds
 } thread_shutdown_info;
 
-typedef struct {
+typedef struct thread {
     uint thread_write_flags;
     uint id;
     thread_handle handle;
@@ -1835,7 +1849,7 @@ typedef struct {
     thread_shutdown_info prog_info;
 } thread;
 
-typedef struct {
+typedef struct thread_pool {
     thread threads[THREAD_COUNT];
     thread_work_queue work_queues[THREAD_WORK_QUEUE_COUNT];
 } thread_pool;
@@ -1851,6 +1865,166 @@ uint thread_add_work(thread_pool *pool, uint count, thread_work *work, thread_wo
 #define thread_add_work_medium(pool, cnt, work) thread_add_work(pool, cnt, work, THREAD_WORK_QUEUE_PRIORITY_MEDIUM)
 
 #endif // #ifdef SOL_THREAD
+
+////////////////////////////////////////////////////////////////////////////////
+// time.h
+
+static inline struct timespec get_time_cpu_proc() {
+    struct timespec ts;
+    int ok = clock_gettime(CLOCK_PROCESS_CPUTIME_ID, &ts);
+    log_print_error_if(ok == (clock_t)-1, "failed to get time");
+    return ts;
+}
+
+static inline struct timespec get_time_cpu_thread() {
+    struct timespec ts;
+    int ok = clock_gettime(CLOCK_THREAD_CPUTIME_ID, &ts);
+    log_print_error_if(ok == (clock_t)-1, "failed to get time");
+    return ts;
+}
+
+static inline struct timespec diffts(struct timespec *x, struct timespec *y)
+{
+    return (struct timespec){
+        .tv_sec = labs(x->tv_sec - y->tv_sec),
+        .tv_nsec = labs(x->tv_nsec - y->tv_nsec),
+    };
+}
+
+static inline float floatts(struct timespec *ts)
+{
+    float f = ts->tv_sec;
+    return f + (ts->tv_nsec * 10e-10);
+}
+
+static inline void print_ts_float(struct timespec *ts)
+{
+    println("%fs", floatts(ts));
+}
+
+static inline void print_ts(struct timespec *ts)
+{
+    println("%us and %uns", ts->tv_sec, ts->tv_nsec);
+}
+
+// @Optimise This is not optimal as the the string_array ranges array is
+// guaranteed to be the same length as times and function pointers, so they
+// could all resize in the same malloc as opposed to requiring separate. For
+// now though I am not going to create a more specific data structure to address
+// this. In reality it will not really be an issue as resizes should be very
+// rare, and will become more infrequent as the program runs. Plus timers are
+// likely debug or dev builds only.
+typedef struct block_timer {
+    string_array fn; // function names
+    void **pfn; // dyn_array; function addresses
+    float *t; // dyn_array; times
+} block_timer;
+
+struct block_time {
+    string fn;
+    void *pfn;
+    float time;
+};
+
+typedef struct program_timer {
+    pthread_t h[THREAD_COUNT + 1]; // thread handles (+1 main thread)
+    block_timer t[THREAD_COUNT + 1];
+} program_timer;
+
+static inline block_timer new_block_timer(uint fn_count, allocator *alloc)
+{
+    block_timer ret;
+    ret.fn = new_strarr(fn_count<<4, fn_count, alloc);
+    ret.pfn = new_array(fn_count, *ret.pfn, alloc);
+    ret.t = new_array(fn_count, *ret.t, alloc);
+    return ret;
+}
+
+static inline void free_block_timer(block_timer *bt)
+{
+    free_strarr(&bt->fn);
+    free_array(bt->pfn);
+    free_array(bt->t);
+}
+
+static inline void block_timer_add(block_timer *bt, float t, string *fn, void* pfn)
+{
+    strarr_add(&bt->fn, fn);
+    array_add(bt->pfn, pfn);
+    array_add(bt->t, t);
+}
+
+static inline struct block_time block_timer_get(block_timer *bt, uint i)
+{
+    return (struct block_time){
+        .fn = strarr_get(&bt->fn, i),
+        .pfn = bt->pfn[i],
+        .time = bt->t[i],
+    };
+}
+
+static inline void reset_block_timer(block_timer *bt)
+{
+    reset_strarr(&bt->fn);
+    reset_array(&bt->t);
+    reset_array(&bt->pfn);
+}
+
+static inline void print_block_times(block_timer *bt)
+{
+    for(uint i = 0; i < strarr_len(&bt->fn); ++i)
+        println("%s: %f", strarr_get(&bt->fn, i).cstr, bt->t[i]);
+}
+
+static inline void new_prog_timer(thread_pool *tp, uint fn_count, allocator *alloc, program_timer *ret)
+{
+    ret->t[0] = new_block_timer(fn_count, alloc);
+    ret->h[0] = pthread_self();
+    for(uint i = 1; i < THREAD_COUNT + 1; ++i) {
+        ret->t[i] = new_block_timer(fn_count, alloc);
+        ret->h[i] = tp->threads[i-1].handle;
+    }
+}
+
+static inline void free_prog_timer(program_timer *pt)
+{
+    free_block_timer(&pt->t[0]);
+    for(uint i = 1; i < THREAD_COUNT + 1; ++i)
+        free_block_timer(&pt->t[i]);
+}
+
+static inline void prog_timer_add(program_timer *pt, float t, string *fn, void* pfn)
+{
+    pthread_t id = pthread_self();
+    uint bt = 0;
+    for(uint i = 0; i < THREAD_COUNT + 1; ++i)
+        bt += i & max_if(pthread_equal(id, pt->h[i]));
+    block_timer_add(&pt->t[bt], t, fn, pfn);
+}
+
+void dump_prog_timer(program_timer *pt, const char *file, allocator *alloc);
+
+#define BT_START() \
+    struct timespec m__t_##__COUNTER__ = get_time_cpu_thread()
+#define BT_STOP(bt)                                                    \
+    do {                                                               \
+        struct timespec m__t = get_time_cpu_thread();                  \
+        m__t = diffts(&m__t, &m__t_##__COUNTER__);                     \
+        float m__tf = floatts(&m__t);                                  \
+        string m__s = {cstr_as_array_len(__FUNCTION__), __FUNCTION__}; \
+        block_timer_add(bt, m__tf, &m__s, FN_ADDR);                    \
+    } while(0)
+
+#define PT_START() \
+    struct timespec m__t_##__COUNTER__ = get_time_cpu_thread()
+#define PT_STOP(pt)                                                                   \
+    do {                                                                              \
+        struct timespec m__t = get_time_cpu_thread();                                 \
+        m__t = diffts(&m__t, &m__t_##__COUNTER__);                                    \
+        float m__tf = floatts(&m__t);                                                 \
+        string m__s = {.len = cstr_as_array_len(__FUNCTION__), .cstr = __FUNCTION__}; \
+        prog_timer_add(pt, m__tf, &m__s, FN_ADDR);                                    \
+    } while(0)
 
 ////////////////////////////////////////////////////////////////////////////////
 // test.h
@@ -3010,8 +3184,10 @@ int new_thread_pool(struct allocation buffers_heap[THREAD_COUNT], struct allocat
         pool->threads[i].id = i;
         pool->threads[i].pool_write_flags = 0x0;
         pool->threads[i].thread_write_flags = 0x0;
+#ifdef SOL_ALLOC
         pool->threads[i].alloc_heap = new_heap_allocator(buffers_heap[i].size, buffers_heap[i].data);
         pool->threads[i].alloc_temp = new_linear_allocator(buffers_temp[i].size, buffers_temp[i].data);
+#endif
         pool->threads[i].work_queues = pool->work_queues;
         res = create_thread(&pool->threads[i].handle, NULL, thread_start, &pool->threads[i]);
         log_print_error_if(res, "failed to create thread %u", i);
@@ -3257,6 +3433,59 @@ static void* thread_shutdown(thread *self)
 }
 
 #endif // #ifdef SOL_THREAD
+
+////////////////////////////////////////////////////////////////////////////////
+// time.c
+
+static void dump_prog_timer_thread(program_timer *pt, string_builder *sb, uint idx);
+
+void dump_prog_timer(program_timer *pt, const char *file, allocator *alloc)
+{
+    uint sz = 2 * pt->t[0].fn.b.cap * (THREAD_COUNT + 1);
+    char *buf = allocate(alloc, sz);
+    string_builder sb = sb_new(sz, buf);
+
+    dump_prog_timer_thread(pt, &sb, 0);
+    for(uint i = 0; i < THREAD_COUNT; ++i)
+        dump_prog_timer_thread(pt, &sb, i+1);
+
+    if (file)
+        file_write_char(file, sb.used, sb.data);
+    else
+        print_count_chars(sb.data, sb.used);
+}
+
+static void dump_prog_timer_thread(program_timer *pt, string_builder *sb, uint idx)
+{
+    const char main_msg[] = ", (main thread)";
+    const char thread_msg[] = "Thread ";
+    char nb[8];
+    uint nl = uint_to_ascii(idx, nb);
+
+    sb_add(sb, cstr_as_array_len(thread_msg), thread_msg);
+    sb_add(sb, nl, nb);
+    sb_add_if(sb, cstr_as_array_len(main_msg), main_msg, idx == 0);
+    sb_add(sb, 2, ":\n");
+
+    string s;
+
+    // @Optimise Should use a specialised function here, not just general string_format()
+    for(uint i = 0; i < strarr_len(&pt->t[idx].fn); ++i) {
+        s = strarr_get(&pt->t[idx].fn, i);
+        sb_add(sb, 2, "  ");
+        sb_add(sb, s.len, s.cstr);
+        sb_add(sb, 2, ", ");
+
+        nl = sb->used;
+        assert(sb->used - sb->cap > 32 && "Inserting float may overflow");
+        string_format(sb->data + sb->used, "%f", pt->t[idx].t[i]);
+        sb_inc(sb, strlen(sb->data + nl));
+
+        sb_addnl(sb);
+    }
+
+    reset_block_timer(&pt->t[idx]);
+}
 
 ////////////////////////////////////////////////////////////////////////////////
 // test.c
