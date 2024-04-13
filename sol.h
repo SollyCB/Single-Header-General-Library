@@ -1,3 +1,6 @@
+#ifndef SOL_H_INCLUDE_GUARD_
+#define SOL_H_INCLUDE_GUARD_
+
 #define _GNU_SOURCE
 
 #include <string.h>
@@ -25,8 +28,6 @@
 #include <pthread.h>
 #endif
 
-#define SOL_DEF
-
 // @Todo
 // math.h <- this is currently under construction elsewhere
 
@@ -35,8 +36,8 @@
 ////////////////////////////////////////////////////////////////////////////////
 // defs.h
 
-// Note that my regular implementation of this file is bisected by print.h and
-// log.h as they have some weird dependencies that are unnecessary to fix.
+#define THREAD_COUNT 4
+#define DEBUG 1
 
 typedef unsigned int uint;
 
@@ -66,6 +67,12 @@ typedef unsigned char uchar;
 #define Max_s16  INT16_MAX
 #define Max_s8   INT8_MAX
 
+#ifndef _WIN32
+    #define FN_ADDR __builtin_frame_address(0)
+#else
+    #error Todo
+#endif
+
 #define float_or_max(f) ((float)((uint64)(f) | Max_u64))
 
 #ifndef _WIN32
@@ -84,8 +91,6 @@ typedef unsigned char uchar;
 #define max_if(eval) (Max_u64 + !(eval))
 #define zero_if(eval) (Max_u64 + (eval))
 
-const uint64 one64 = 1;
-
 struct mem_req {
     size_t size;
     size_t alignment;
@@ -99,169 +104,6 @@ struct range {
 struct pair_uint {
     uint x,y;
 };
-
-////////////////////////////////////////////////////////////////////////////////
-// assert.h
-
-#define DEBUG 1
-
-#if DEBUG
-#if _WIN32
-
-#define assert(x) \
-    if (!(x)) {printf("\n    [file: %s, line: %i, fn %s]\n        ** ASSERTION FAILED **: %s\n\n", __FILE__, __LINE__, __FUNCTION__, #x); __debugbreak;}
-
-#else
-
-#define assert(x) \
-    if (!(x)) {printf("\n    [file: %s, line: %i, fn %s]\n        ** ASSERTION FAILED **: %s\n\n", __FILE__, __LINE__, __FUNCTION__, #x); asm("int $3");}
-
-#endif // _WIN32 or not
-
-#else
-#define assert(x)
-#endif // if DEBUG
-
-////////////////////////////////////////////////////////////////////////////////
-// print.h
-
-// 'args' must have been started, ends 'args' itself
-void string_format_backend(char *format_buffer, const char *fmt, va_list args);
-
-static inline void string_format(char *format_buffer, const char *fmt, ...) {
-    va_list args;
-    va_start(args, fmt);
-    string_format_backend(format_buffer, fmt, args);
-}
-
-static inline void print(const char *fmt, ...) {
-    va_list args;
-    va_start(args, fmt);
-
-    char format_buffer[1024];
-    string_format_backend(format_buffer, fmt, args);
-
-    fwrite(format_buffer, 1, strlen(format_buffer), stdout);
-}
-
-static inline void println(const char *fmt, ...) {
-    va_list args;
-    va_start(args, fmt);
-
-    char format_buffer[1024];
-    string_format_backend(format_buffer, fmt, args);
-
-    int tmp = strlen(format_buffer);
-    format_buffer[tmp] = '\n';
-
-    fwrite(format_buffer, 1, tmp + 1, stdout);
-}
-
-static inline void print_count_chars(const char *data, int count) {
-    fwrite(data, 1, count, stdout);
-}
-
-static inline void print_count_chars_ln(const char *data, int count) {
-    fwrite(data, 1, count, stdout);
-    println("");
-}
-
-static inline void print_time(long seconds, long nanoseconds) {
-    char zbuf[32];
-    int bi = 0;
-    for(long i = 100000000; i > nanoseconds; i /= 10) {
-        zbuf[bi] = '0';
-        bi++;
-    }
-    zbuf[bi] = '\0';
-    println("%u.%s%u", seconds, zbuf, nanoseconds);
-}
-
-static inline void print_ts(struct timespec ts) {
-    char zbuf[32];
-    int bi = 0;
-    for(long i = 100000000; i > ts.tv_nsec; i /= 10) {
-        zbuf[bi] = '0';
-        bi++;
-    }
-    zbuf[bi] = '\0';
-    println("%u.%s%u", ts.tv_sec, zbuf, ts.tv_nsec);
-}
-
-////////////////////////////////////////////////////////////////////////////////
-// log.h
-
-typedef enum {
-    LOG_LEVEL_NONE = 0,
-    LOG_LEVEL_ERROR = 1,
-} log_level_severity;
-
-static const char *LOG_LEVEL_MSG_TABLE[] = {
-    "NONE",
-    "ERROR",
-};
-
-#define LOG_LEVEL 1
-#define LOG_BREAK 1
-
-static inline void fn_log_print(
-    log_level_severity  severity,
-    const char         *file,
-    int                 line,
-    const char         *function,
-    const char         *msg, ...)
-{
-    char buf[1024];
-    va_list args;
-    va_start(args, msg);
-    string_format_backend(buf, msg, args);
-
-    if (severity >= LOG_LEVEL) {
-        print("LOG %s (%s, line %i, fn %s): ", LOG_LEVEL_MSG_TABLE[severity], file, line, function);
-        buf[strlen(buf) + 1] = '\0';
-        buf[strlen(buf) + 0] = '\n';
-        print_count_chars(buf, strlen(buf));
-    }
-}
-
-#ifndef _WIN32
-    #define asm __asm__
-#endif
-
-#if LOG_LEVEL
-
-#if LOG_BREAK
-    #define LOG_BREAKPOINT println("LOG BREAK"); asm("int $3")
-#else
-    #define LOG_BREAKPOINT
-#endif
-
-
-#define log_print(severity, msg...)                                                \
-    do {                                                                           \
-        fn_log_print(severity, __FILE__, __LINE__, __FUNCTION__, msg);             \
-        LOG_BREAKPOINT;                                                            \
-    } while(0)
-
-#define log_print_if(predicate, severity, msg...)                          \
-    do {                                                                   \
-        if ((predicate)) {                                                 \
-            fn_log_print(severity, __FILE__, __LINE__, __FUNCTION__, msg); \
-            LOG_BREAKPOINT;                                                \
-        }                                                                  \
-    } while(0)
-
-#else
-
-#define log_print(severity, msg...)
-#define log_print_if(predicate, severity, msg...)
-
-#endif
-
-#define log_print_error(msg...) \
-    log_print(LOG_LEVEL_ERROR, msg)
-#define log_print_error_if(predicate, msg...) \
-    log_print_if(predicate, LOG_LEVEL_ERROR, msg)
 
 static inline void update_range(struct range *range, size_t offset, size_t size) {
     range->offset -= range->offset & max64_if_true(offset < range->offset);
@@ -501,12 +343,153 @@ static inline bool flag_check(uint64 flags, uint64 bit) {
 }
 
 static inline bool mask_array_check_no_mod(uint64 *masks, uint index) {
-    return masks[index >> 6] & (one64 << (index & 63));
+    uint64 one = 1;
+    return masks[index >> 6] & (one << (index & 63));
 }
 
 static inline void mask_array_set_no_mod(uint64 *masks, uint index) {
-    masks[index >> 6] |= (one64 << (index & 63));
+    uint64 one = 1;
+    masks[index >> 6] |= (one << (index & 63));
 }
+
+////////////////////////////////////////////////////////////////////////////////
+// assert.h
+
+#if DEBUG
+#if _WIN32
+
+#define assert(x) \
+    if (!(x)) {printf("\n    [file: %s, line: %i, fn %s]\n        ** ASSERTION FAILED **: %s\n\n", __FILE__, __LINE__, __FUNCTION__, #x); __debugbreak;}
+
+#else
+
+#define assert(x) \
+    if (!(x)) {printf("\n    [file: %s, line: %i, fn %s]\n        ** ASSERTION FAILED **: %s\n\n", __FILE__, __LINE__, __FUNCTION__, #x); asm("int $3");}
+
+#endif // _WIN32 or not
+
+#else
+#define assert(x)
+#endif // if DEBUG
+
+////////////////////////////////////////////////////////////////////////////////
+// print.h
+
+// 'args' must have been started, ends 'args' itself
+void string_format_backend(char *format_buffer, const char *fmt, va_list args);
+
+static inline void string_format(char *format_buffer, const char *fmt, ...) {
+    va_list args;
+    va_start(args, fmt);
+    string_format_backend(format_buffer, fmt, args);
+}
+
+static inline void print(const char *fmt, ...) {
+    va_list args;
+    va_start(args, fmt);
+
+    char format_buffer[1024];
+    string_format_backend(format_buffer, fmt, args);
+
+    fwrite(format_buffer, 1, strlen(format_buffer), stdout);
+}
+
+static inline void println(const char *fmt, ...) {
+    va_list args;
+    va_start(args, fmt);
+
+    char format_buffer[1024];
+    string_format_backend(format_buffer, fmt, args);
+
+    int tmp = strlen(format_buffer);
+    format_buffer[tmp] = '\n';
+
+    fwrite(format_buffer, 1, tmp + 1, stdout);
+}
+
+static inline void print_count_chars(const char *data, int count) {
+    fwrite(data, 1, count, stdout);
+}
+
+static inline void print_count_chars_ln(const char *data, int count) {
+    fwrite(data, 1, count, stdout);
+    println("");
+}
+
+////////////////////////////////////////////////////////////////////////////////
+// log.h
+
+typedef enum {
+    LOG_LEVEL_NONE = 0,
+    LOG_LEVEL_ERROR = 1,
+} log_level_severity;
+
+static const char *LOG_LEVEL_MSG_TABLE[] = {
+    "NONE",
+    "ERROR",
+};
+
+#define LOG_LEVEL 1
+#define LOG_BREAK 1
+
+static inline void fn_log_print(
+    log_level_severity  severity,
+    const char         *file,
+    int                 line,
+    const char         *function,
+    const char         *msg, ...)
+{
+    char buf[1024];
+    va_list args;
+    va_start(args, msg);
+    string_format_backend(buf, msg, args);
+
+    if (severity >= LOG_LEVEL) {
+        print("LOG %s (%s, line %i, fn %s): ", LOG_LEVEL_MSG_TABLE[severity], file, line, function);
+        buf[strlen(buf) + 1] = '\0';
+        buf[strlen(buf) + 0] = '\n';
+        print_count_chars(buf, strlen(buf));
+    }
+}
+
+#ifndef _WIN32
+    #define asm __asm__
+#endif
+
+#if LOG_LEVEL
+
+#if LOG_BREAK
+    #define LOG_BREAKPOINT println("LOG BREAK"); asm("int $3")
+#else
+    #define LOG_BREAKPOINT
+#endif
+
+
+#define log_print(severity, msg...)                                                \
+    do {                                                                           \
+        fn_log_print(severity, __FILE__, __LINE__, __FUNCTION__, msg);             \
+        LOG_BREAKPOINT;                                                            \
+    } while(0)
+
+#define log_print_if(predicate, severity, msg...)                          \
+    do {                                                                   \
+        if ((predicate)) {                                                 \
+            fn_log_print(severity, __FILE__, __LINE__, __FUNCTION__, msg); \
+            LOG_BREAKPOINT;                                                \
+        }                                                                  \
+    } while(0)
+
+#else
+
+#define log_print(severity, msg...)
+#define log_print_if(predicate, severity, msg...)
+
+#endif
+
+#define log_print_error(msg...) \
+    log_print(LOG_LEVEL_ERROR, msg)
+#define log_print_error_if(predicate, msg...) \
+    log_print_if(predicate, LOG_LEVEL_ERROR, msg)
 
 ////////////////////////////////////////////////////////////////////////////////
 // ascii.h
@@ -1774,7 +1757,6 @@ static inline void* fn_hash_map_delete_str(hash_map *map, const char* key) {
     #define thread_handle HANDLE
 #endif
 
-#define THREAD_COUNT 2
 #define THREAD_WORK_QUEUE_COUNT 3
 #define THREAD_WORK_QUEUE_SIZE 1024
 
@@ -3786,3 +3768,4 @@ void test_ptreq(
 }
 
 #endif // source guard
+#endif // include guard
