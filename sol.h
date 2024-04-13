@@ -1,3 +1,5 @@
+#define _GNU_SOURCE
+
 #include <string.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -11,11 +13,11 @@
 #include <immintrin.h>
 #include <time.h>
 #include <errno.h>
-#include <unistd.h>
 #include <dirent.h>
 
-#include <sys/stat.h>
+#include <unistd.h>
 #include <sys/types.h>
+#include <sys/stat.h>
 
 #define SOL_THREAD
 
@@ -173,6 +175,17 @@ static inline void print_time(long seconds, long nanoseconds) {
     }
     zbuf[bi] = '\0';
     println("%u.%s%u", seconds, zbuf, nanoseconds);
+}
+
+static inline void print_ts(struct timespec ts) {
+    char zbuf[32];
+    int bi = 0;
+    for(long i = 100000000; i > ts.tv_nsec; i /= 10) {
+        zbuf[bi] = '0';
+        bi++;
+    }
+    zbuf[bi] = '\0';
+    println("%u.%s%u", ts.tv_sec, zbuf, ts.tv_nsec);
 }
 
 ////////////////////////////////////////////////////////////////////////////////
