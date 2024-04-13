@@ -2325,20 +2325,17 @@ inline static bool print_check_config_flags(Print_Flags flags, Print_Value value
     case PRINT_VALUE_STRING:
     case PRINT_VALUE_CHAR:
     case PRINT_VALUE_FLOAT:
-        return flags == 0;
+        return flags;
     case PRINT_VALUE_SINT:
+        return flags & ~(PRINT_HEX_BIT | PRINT_BIN_BIT | PRINT_LZ_BIT | PRINT_UINT_BIT);
     case PRINT_VALUE_UINT:
-        flags &= ~(PRINT_HEX_BIT | PRINT_BIN_BIT | PRINT_LZ_BIT);
-        return flags == 0;
+        return flags & ~(PRINT_HEX_BIT | PRINT_BIN_BIT | PRINT_LZ_BIT | PRINT_SINT_BIT);
     case PRINT_VALUE_HEX:
-        flags &= PRINT_STRING_BIT | PRINT_FLOAT_BIT | PRINT_CHAR_BIT | PRINT_HEX_BIT;
-        return flags == 0;
+        return flags & (PRINT_STRING_BIT | PRINT_FLOAT_BIT | PRINT_CHAR_BIT | PRINT_HEX_BIT);
     case PRINT_VALUE_BIN:
-        flags &= PRINT_STRING_BIT | PRINT_FLOAT_BIT | PRINT_CHAR_BIT | PRINT_BIN_BIT;
-        return flags == 0;
+        return flags & (PRINT_STRING_BIT | PRINT_FLOAT_BIT | PRINT_CHAR_BIT | PRINT_BIN_BIT);
     case PRINT_VALUE_LZ:
-        flags &= PRINT_STRING_BIT | PRINT_FLOAT_BIT | PRINT_CHAR_BIT | PRINT_LZ_BIT;
-        return flags == 0;
+        return flags & (PRINT_STRING_BIT | PRINT_FLOAT_BIT | PRINT_CHAR_BIT | PRINT_LZ_BIT);
     default:
         assert(false && "Invalid Flag Check");
         return false;
@@ -2355,9 +2352,6 @@ void string_format_backend(char *format_buffer, const char *fmt, va_list args) {
 
     Print_Config config = {};
     bool is_ident    = false;
-    bool parse_sint  = false;
-    bool parse_uint  = false;
-    // bool parse_float = false; -Wunused
 
     int tmp;
     // char last_char = 0; -Wunused
@@ -2380,19 +2374,16 @@ void string_format_backend(char *format_buffer, const char *fmt, va_list args) {
             continue;
         } else {
             is_ident = true;
-
             config   = (Print_Config){};
-            parse_sint  = false;
-            parse_uint  = false;
-            // parse_float = false; -Wunused
-
             j++;
             while(is_ident && fmt[j] != 0) {
                 switch(fmt[j]) {
                 case 0:
                     goto not_ident;
+                case '\\':
+                    goto not_ident;
                 case 'f':
-                    if (!print_check_config_flags(config.flags, PRINT_VALUE_FLOAT)) {
+                    if (print_check_config_flags(config.flags, PRINT_VALUE_FLOAT)) {
                         goto not_ident;
                     }
                     f = va_arg(args, double);
@@ -2404,7 +2395,7 @@ void string_format_backend(char *format_buffer, const char *fmt, va_list args) {
                     j++;
                     goto not_ident;
                 case 'c':
-                    if (!print_check_config_flags(config.flags, PRINT_VALUE_CHAR)) {
+                    if (print_check_config_flags(config.flags, PRINT_VALUE_CHAR)) {
                         goto not_ident;
                     }
                     c = (char)va_arg(args, int);
@@ -2414,7 +2405,7 @@ void string_format_backend(char *format_buffer, const char *fmt, va_list args) {
                     j++;
                     goto not_ident;
                 case 's':
-                    if (!print_check_config_flags(config.flags, PRINT_VALUE_STRING)) {
+                    if (print_check_config_flags(config.flags, PRINT_VALUE_STRING)) {
                         goto not_ident;
                     }
                     s = va_arg(args, char*);
@@ -2425,7 +2416,7 @@ void string_format_backend(char *format_buffer, const char *fmt, va_list args) {
                     j++;
                     goto not_ident;
                 case 'h':
-                    if (!print_check_config_flags(config.flags, PRINT_VALUE_HEX)) {
+                    if (print_check_config_flags(config.flags, PRINT_VALUE_HEX)) {
                         j++;
                         goto not_ident;
                     } else {
@@ -2433,7 +2424,7 @@ void string_format_backend(char *format_buffer, const char *fmt, va_list args) {
                     }
                     break;
                 case 'b':
-                    if (!print_check_config_flags(config.flags, PRINT_VALUE_BIN)) {
+                    if (print_check_config_flags(config.flags, PRINT_VALUE_BIN)) {
                         j++;
                         goto not_ident;
                     } else {
@@ -2441,7 +2432,7 @@ void string_format_backend(char *format_buffer, const char *fmt, va_list args) {
                     }
                     break;
                 case 'z':
-                    if (!print_check_config_flags(config.flags, PRINT_VALUE_LZ)) {
+                    if (print_check_config_flags(config.flags, PRINT_VALUE_LZ)) {
                         j++;
                         goto not_ident;
                     } else {
@@ -2449,21 +2440,21 @@ void string_format_backend(char *format_buffer, const char *fmt, va_list args) {
                     }
                     break;
                 case 'i':
-                    if (!print_check_config_flags(config.flags, PRINT_VALUE_SINT)) {
+                    if (print_check_config_flags(config.flags, PRINT_VALUE_SINT)) {
                         j++;
                         goto not_ident;
                     } else {
                         i = va_arg(args, int64);
-                        parse_sint = true;
+                        config.flags |= PRINT_SINT_BIT;
                     }
                     break;
                 case 'u':
-                    if (!print_check_config_flags(config.flags, PRINT_VALUE_UINT)) {
+                    if (print_check_config_flags(config.flags, PRINT_VALUE_UINT)) {
                         j++;
                         goto not_ident;
                     } else {
                         u = va_arg(args, uint64);
-                        parse_uint = true;
+                        config.flags |= PRINT_UINT_BIT;
                     }
                     break;
                 default:
@@ -2475,12 +2466,10 @@ void string_format_backend(char *format_buffer, const char *fmt, va_list args) {
             not_ident:
             j--; // ensure next loop iteration sees non ident value
 
-            if (parse_uint) {
+            if (config.flags & PRINT_UINT_BIT) {
                 print_parse_unsigned_int(&config, u, &buf_pos, format_buffer);
-                parse_uint = false;
-            } else if (parse_sint) {
+            } else if (config.flags & PRINT_SINT_BIT) {
                 print_parse_signed_int(&config, i, &buf_pos, format_buffer);
-                parse_sint = false;
             }
         }
     }
