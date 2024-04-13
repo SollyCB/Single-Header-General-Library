@@ -1046,6 +1046,29 @@ void store_array(const char *fname, void *a);
 ////////////////////////////////////////////////////////////////////////////////
 // string.h
 
+// @Note Below is the justification for my new type and function naming
+// conventions:
+//
+// Short function names; Descriptive type names.
+//
+// I want to have a proper little think about the sorts of interface naming
+// conventions I want to have. I personally really like the very terse language
+// of the C standard functions, linux functions, etc., but I prefer more
+// descriptive type names. Certain functions, like string_buffer_get_string()
+// are not annoying to type once perhaps, but if you are iterating designs
+// and deleting and retyping, or just trying to shit smtg out because you know
+// exactly what you need, I certainly notice that I am typing long variable
+// or function names. Type names not so much, as variable declarations are
+// relatively rare.
+//
+// Typing strbuf_get() I think is better than string_buffer_get_string().
+// By seeing the descriptive type name, it is clear what 'strbuf' is an
+// abbreviation of, so there is little confusion in the function usage, such
+// as whether the caller is using something which acts on a string_builder
+// or string_buffer. After thinking it through, I will at least stick to this
+// philosophy in future, but I doubt I will convert many interfaces to it, that
+// would be a waste.
+
 typedef struct {
     const char *cstr;
     uint64 len;
@@ -1062,8 +1085,8 @@ enum {
 typedef struct {
     uint flags;
     char *data;
-    uint64_t used;
-    uint64_t cap;
+    uint used;
+    uint cap;
     allocator *alloc;
 } string_buffer;
 
@@ -1083,42 +1106,43 @@ typedef struct {
     char *data;
 } string_builder;
 
-static inline string cstr_to_string(const char *cstr)
+static inline string cstr_to_str(const char *cstr)
 {
     return (string){.cstr = cstr, .len = strlen(cstr)};
 }
 
-string_buffer new_string_buffer(uint64 cap, uint flags, allocator *alloc);
-void free_string_buffer(string_buffer *buf);
+string_buffer new_strbuf(uint64 cap, uint flags, allocator *alloc);
+void free_strbuf(string_buffer *buf);
 
-static inline string_buffer new_dyn_string_buffer(uint64 cap, allocator *alloc)
+static inline string_buffer new_dyn_strbuf(uint64 cap, allocator *alloc)
 {
-    return new_string_buffer(cap, STRING_BUFFER_REALLOCATE_BIT, alloc);
+    return new_strbuf(cap, STRING_BUFFER_REALLOCATE_BIT, alloc);
 }
-static inline string_buffer new_static_string_buffer(uint64 cap, allocator *alloc)
+static inline string_buffer new_static_strbuf(uint64 cap, allocator *alloc)
 {
-    return new_string_buffer(cap, 0x0, alloc);
+    return new_strbuf(cap, 0x0, alloc);
 }
 
-string string_buffer_get_string(string_buffer *buf, string *str);
-string string_buffer_get_string_from_cstring(string_buffer *buf, const char *cstr);
+string strbuf_add(string_buffer *buf, string *str);
+string strbuf_add_cstr(string_buffer *buf, const char *cstr);
 
-static inline string_array new_string_array(uint initial_buffer_size, uint initial_array_len, allocator *alloc)
+static inline string_array new_strarr(uint initial_buffer_size, uint initial_array_len,
+                                      allocator *alloc)
 {
     string_array ret;
     ret.r = new_array(initial_array_len, *ret.r, alloc);
-    ret.b = new_dyn_string_buffer(initial_buffer_size, alloc);
+    ret.b = new_dyn_strbuf(initial_buffer_size, alloc);
     return ret;
 }
 
-static inline uint string_array_len(string_array *arr)
+static inline uint strarr_len(string_array *arr)
 {
     return array_len(arr->r);
 }
 
-static inline void string_array_add(string_array *arr, string *str)
+static inline void strarr_add(string_array *arr, string *str)
 {
-    string_buffer_get_string(&arr->b, str);
+    strbuf_add(&arr->b, str);
     struct pair_uint r = { // +-1 for null byte
         .x = arr->b.used - (str->len+1),
         .y = str->len,
@@ -1126,9 +1150,9 @@ static inline void string_array_add(string_array *arr, string *str)
     array_add(arr->r, r);
 }
 
-static inline void string_array_add_cstr(string_array *arr, const char *cstr)
+static inline void strarr_add_cstr(string_array *arr, const char *cstr)
 {
-    string_buffer_get_string_from_cstring(&arr->b, cstr);
+    strbuf_add_cstr(&arr->b, cstr);
     uint len = strlen(cstr);
     struct pair_uint r = { // +-1 for null byte
         .x = arr->b.used - (len+1),
@@ -1137,7 +1161,7 @@ static inline void string_array_add_cstr(string_array *arr, const char *cstr)
     array_add(arr->r, r);
 }
 
-static inline string string_array_get_string(string_array *arr, uint i)
+static inline string strarr_get(string_array *arr, uint i)
 {
     return (string){
         .cstr = arr->b.data + arr->r[i].x,
@@ -1145,30 +1169,13 @@ static inline string string_array_get_string(string_array *arr, uint i)
     };
 }
 
-static inline string_array string_split(string *str, char split_char, allocator *alloc)
-{
-    string_array ret = new_string_array(str->len + (str->len>>3), str->len>>3, alloc);
-    string tmp;
-    uint pos = 0;
-    uint inc;
-    while(1) {
-        tmp.cstr = str->cstr + pos;
-        tmp.len = pos;
+string_array str_split(string *str, char split_char, allocator *alloc);
 
-        inc = simd_find_char_with_len(str->len - pos, str->cstr + pos, split_char);
-
-        if (inc == Max_u32)
-            break;
-
-        pos += inc;
-        tmp.len = pos - tmp.len;
-        string_array_add(&ret, &tmp);
-
-        pos++;
-    }
-    return ret;
-}
-
+// @Note Although one can argue that 'sb_' prefix clashes with string_buffer,
+// the descriptive type names and the compiler assurance of type safety to me
+// nullifies the complaint. string_builder functions are often called frequently
+// and repeatedly, making a longer prefix more frustrating to use than one which
+// is more distinguishing.
 static inline string_builder sb_new(uint32 size, char *data)
 {
     return (string_builder){0, size, data};
@@ -2410,8 +2417,8 @@ struct dir getdir(const char *name, allocator *alloc)
     }
 
     struct dir ret = {
-        .f = new_string_array(128, 16, alloc),
-        .d = new_string_array(64, 8, alloc),
+        .f = new_strarr(128, 16, alloc),
+        .d = new_strarr(64, 8, alloc),
     };
 
     DIR *d = opendir(name);
@@ -2420,9 +2427,9 @@ struct dir getdir(const char *name, allocator *alloc)
     while((de = readdir(d)))
         if (memcmp(de->d_name, ".", 1) && memcmp(de->d_name, "..", 2)) {
             if (de->d_type == DT_REG)
-                string_array_add_cstr(&ret.f, de->d_name);
+                strarr_add_cstr(&ret.f, de->d_name);
             else if (de->d_type == DT_DIR)
-                string_array_add_cstr(&ret.d, de->d_name);
+                strarr_add_cstr(&ret.d, de->d_name);
         }
     return ret;
 }
@@ -2677,9 +2684,9 @@ void store_array(const char *fname, void *a)
 //////////////////////////////////////////////////////////////
 // string.c
 
-static void realloc_string_buffer(string_buffer *buf, uint64 newsz);
+static void realloc_strbuf(string_buffer *buf, uint64 newsz);
 
-string_buffer new_string_buffer(uint64 cap, uint flags, allocator *alloc)
+string_buffer new_strbuf(uint64 cap, uint flags, allocator *alloc)
 {
     string_buffer ret;
     ret.flags = flags;
@@ -2690,7 +2697,7 @@ string_buffer new_string_buffer(uint64 cap, uint flags, allocator *alloc)
     return ret;
 }
 
-void free_string_buffer(string_buffer *buf)
+void free_strbuf(string_buffer *buf)
 {
     deallocate(buf->alloc, buf->data);
     buf->cap = 0;
@@ -2701,11 +2708,11 @@ void free_string_buffer(string_buffer *buf)
 // implementation elsewhere. It is useful for a thing I am currently working
 // on, and if it seems like something I would really use in more substantial
 // projects, I will clone it.
-string string_buffer_get_string(string_buffer *buf, string *str)
+string strbuf_add(string_buffer *buf, string *str)
 {
     if (buf->used + str->len + 1 > buf->cap) {
         if(buf->flags & STRING_BUFFER_REALLOCATE_BIT) {
-            realloc_string_buffer(buf, (buf->cap + str->len + 1) * 2);
+            realloc_strbuf(buf, (buf->cap + str->len + 1) * 2);
         } else {
             log_print_error("string_buffer overflow");
             return (string){};
@@ -2723,12 +2730,12 @@ string string_buffer_get_string(string_buffer *buf, string *str)
     return ret;
 }
 
-string string_buffer_get_string_from_cstring(string_buffer *buf, const char *cstr)
+string strbuf_add_cstr(string_buffer *buf, const char *cstr)
 {
     uint64 len = strlen(cstr);
     if (buf->used + len + 1 > buf->cap) {
         if(buf->flags & STRING_BUFFER_REALLOCATE_BIT) {
-            realloc_string_buffer(buf, (buf->cap + len + 1) * 2);
+            realloc_strbuf(buf, (buf->cap + len + 1) * 2);
         } else {
             log_print_error("string_buffer overflow");
             return (string){};
@@ -2746,11 +2753,35 @@ string string_buffer_get_string_from_cstring(string_buffer *buf, const char *cst
     return ret;
 }
 
-static void realloc_string_buffer(string_buffer *buf, uint64 newsz)
+static void realloc_strbuf(string_buffer *buf, uint64 newsz)
 {
     newsz = align(newsz, 16);
     buf->cap  = newsz;
     buf->data = reallocate_with_old_size(buf->alloc, buf->data, buf->used, newsz);
+}
+
+string_array str_split(string *str, char split_char, allocator *alloc)
+{
+    string_array ret = new_strarr(str->len + (str->len>>3), str->len>>3, alloc);
+    string tmp;
+    uint pos = 0;
+    uint inc;
+    while(1) {
+        tmp.cstr = str->cstr + pos;
+        tmp.len = pos;
+
+        inc = simd_find_char_with_len(str->len - pos, str->cstr + pos, split_char);
+
+        if (inc == Max_u32)
+            break;
+
+        pos += inc;
+        tmp.len = pos - tmp.len;
+        strarr_add(&ret, &tmp);
+
+        pos++;
+    }
+    return ret;
 }
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -3250,7 +3281,7 @@ test_suite load_tests(allocator *alloc)
     test_suite ret = (test_suite){};
     ret.tests   = new_array(128, *ret.tests, alloc);
     ret.modules = new_array(128, *ret.modules, alloc);
-    ret.str_buf = new_static_string_buffer(1024, alloc);
+    ret.str_buf = new_static_strbuf(1024, alloc);
     ret.alloc = alloc;
     return ret;
 }
@@ -3310,7 +3341,7 @@ void end_tests(test_suite *suite)
 
     assert(!suite->skipped && !suite->broken && !suite->fail);
 
-    free_string_buffer(&suite->str_buf);
+    free_strbuf(&suite->str_buf);
     free_array(suite->tests);
     free_array(suite->modules);
 
@@ -3332,7 +3363,7 @@ void begin_test_module(
     string_format(info_buffer, "[%s, fn %s] %s", file_name, function_name, name);
     assert(strlen(info_buffer) < 255);
 
-    mod.info = string_buffer_get_string_from_cstring(&suite->str_buf, info_buffer);
+    mod.info = strbuf_add_cstr(&suite->str_buf, info_buffer);
     if (broken) {
         mod.result = TEST_RESULT_BROKEN;
     } else if (skipped) {
@@ -3381,7 +3412,7 @@ void test_backend(
 
     char info[127];
     string_format(info, "%s, line %i, fn %s", file_name,  line_number, function_name);
-    string str = string_buffer_get_string_from_cstring(&suite->str_buf, info);
+    string str = strbuf_add_cstr(&suite->str_buf, info);
 
     if (broken || module->result == TEST_RESULT_BROKEN || module->result == TEST_RESULT_SKIPPED) {
         if (broken || module->result == broken) {
