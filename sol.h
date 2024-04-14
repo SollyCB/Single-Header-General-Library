@@ -3,6 +3,9 @@
 
 #define _GNU_SOURCE
 
+// Defining here enables the LSP to check the source file.
+// #define SOL_DEF
+
 #include <string.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -1889,24 +1892,19 @@ static inline void print_ts(struct timespec *ts)
     println("%us and %uns", ts->tv_sec, ts->tv_nsec);
 }
 
-// @Optimise This is not optimal as the the string_array ranges array is
-// guaranteed to be the same length as times and function pointers, so they
-// could all resize in the same malloc as opposed to requiring separate. For
-// now though I am not going to create a more specific data structure to address
-// this. In reality it will not really be an issue as resizes should be very
-// rare, and will become more infrequent as the program runs. Plus timers are
-// likely debug or dev builds only.
-typedef struct block_timer {
-    string_array fn; // function names
-    void **pfn; // dyn_array; function addresses
-    float *t; // dyn_array; times
-} block_timer;
-
+// @Test @Optimise Might be worth making const char* not string
+// here to save a couple bytes just to make the timer call sites
+// faster. I would not be suprised if this does nothing, since
+// 256 bit mov would comfortably do this size. But still, might
+// be nice to check it...
 struct block_time {
     string fn;
-    void *pfn;
-    float time;
+    float t;
 };
+
+typedef struct block_timer {
+    struct block_time *t;
+} block_timer;
 
 typedef struct program_timer {
     pthread_t h[THREAD_COUNT + 1]; // thread handles (+1 main thread)
@@ -1916,46 +1914,35 @@ typedef struct program_timer {
 static inline block_timer new_block_timer(uint fn_count, allocator *alloc)
 {
     block_timer ret;
-    ret.fn = new_strarr(fn_count<<4, fn_count, alloc);
-    ret.pfn = new_array(fn_count, *ret.pfn, alloc);
     ret.t = new_array(fn_count, *ret.t, alloc);
     return ret;
 }
 
 static inline void free_block_timer(block_timer *bt)
 {
-    free_strarr(&bt->fn);
-    free_array(bt->pfn);
     free_array(bt->t);
 }
 
-static inline void block_timer_add(block_timer *bt, float t, string *fn, void* pfn)
+static inline void block_timer_add(block_timer *bt, float t, string *fn)
 {
-    strarr_add(&bt->fn, fn);
-    array_add(bt->pfn, pfn);
-    array_add(bt->t, t);
+    struct block_time r = {.fn = *fn, .t = t};
+    array_add(bt->t, r);
 }
 
 static inline struct block_time block_timer_get(block_timer *bt, uint i)
 {
-    return (struct block_time){
-        .fn = strarr_get(&bt->fn, i),
-        .pfn = bt->pfn[i],
-        .time = bt->t[i],
-    };
+    return bt->t[i];
 }
 
 static inline void reset_block_timer(block_timer *bt)
 {
-    reset_strarr(&bt->fn);
     reset_array(&bt->t);
-    reset_array(&bt->pfn);
 }
 
 static inline void print_block_times(block_timer *bt)
 {
-    for(uint i = 0; i < strarr_len(&bt->fn); ++i)
-        println("%s: %f", strarr_get(&bt->fn, i).cstr, bt->t[i]);
+    for(uint i = 0; i < array_len(bt->t); ++i)
+        println("%s: %f", bt->t[i].fn, i, bt->t[i].t);
 }
 
 static inline void new_prog_timer(thread_pool *tp, uint fn_count, allocator *alloc, program_timer *ret)
@@ -1975,13 +1962,13 @@ static inline void free_prog_timer(program_timer *pt)
         free_block_timer(&pt->t[i]);
 }
 
-static inline void prog_timer_add(program_timer *pt, float t, string *fn, void* pfn)
+static inline void prog_timer_add(program_timer *pt, float t, string *fn)
 {
     pthread_t id = pthread_self();
     uint bt = 0;
     for(uint i = 0; i < THREAD_COUNT + 1; ++i)
         bt += i & max_if(pthread_equal(id, pt->h[i]));
-    block_timer_add(&pt->t[bt], t, fn, pfn);
+    block_timer_add(&pt->t[bt], t, fn);
 }
 
 void dump_prog_timer(program_timer *pt, const char *file, allocator *alloc);
@@ -1994,7 +1981,7 @@ void dump_prog_timer(program_timer *pt, const char *file, allocator *alloc);
         m__t = diffts(&m__t, &m__t_##__COUNTER__);                     \
         float m__tf = floatts(&m__t);                                  \
         string m__s = {cstr_as_array_len(__FUNCTION__), __FUNCTION__}; \
-        block_timer_add(bt, m__tf, &m__s, FN_ADDR);                    \
+        block_timer_add(bt, m__tf, &m__s);                             \
     } while(0)
 
 #define PT_START() \
@@ -2005,7 +1992,7 @@ void dump_prog_timer(program_timer *pt, const char *file, allocator *alloc);
         m__t = diffts(&m__t, &m__t_##__COUNTER__);                                    \
         float m__tf = floatts(&m__t);                                                 \
         string m__s = {.len = cstr_as_array_len(__FUNCTION__), .cstr = __FUNCTION__}; \
-        prog_timer_add(pt, m__tf, &m__s, FN_ADDR);                                    \
+        prog_timer_add(pt, m__tf, &m__s);                                             \
     } while(0)
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -3412,8 +3399,14 @@ static void dump_prog_timer_thread(program_timer *pt, string_builder *sb, uint i
 
 void dump_prog_timer(program_timer *pt, const char *file, allocator *alloc)
 {
-    uint sz = 2 * pt->t[0].fn.b.cap * (THREAD_COUNT + 1);
+    uint sz = 0;
+    for(uint i = 0; i < THREAD_COUNT+1; ++i)
+        sz += array_len(pt->t[i].t);
+    sz <<= 6;
+
     char *buf = allocate(alloc, sz);
+
+    // @Todo Make string_builder able to be dynamic...
     string_builder sb = sb_new(sz, buf);
 
     dump_prog_timer_thread(pt, &sb, 0);
@@ -3438,18 +3431,15 @@ static void dump_prog_timer_thread(program_timer *pt, string_builder *sb, uint i
     sb_add_if(sb, cstr_as_array_len(main_msg), main_msg, idx == 0);
     sb_add(sb, 2, ":\n");
 
-    string s;
-
-    // @Optimise Should use a specialised function here, not just general string_format()
-    for(uint i = 0; i < strarr_len(&pt->t[idx].fn); ++i) {
-        s = strarr_get(&pt->t[idx].fn, i);
+    for(uint i = 0; i < array_len(pt->t[idx].t); ++i) {
         sb_add(sb, 2, "  ");
-        sb_add(sb, s.len, s.cstr);
+        sb_add(sb, pt->t[idx].t[i].fn.len, pt->t[idx].t[i].fn.cstr);
         sb_add(sb, 2, ", ");
 
+        // @Optimise Should use a specialised function here, not just general string_format()
         nl = sb->used;
         assert(sb->used - sb->cap > 32 && "Inserting float may overflow");
-        string_format(sb->data + sb->used, "%f", pt->t[idx].t[i]);
+        string_format(sb->data + sb->used, "%f", pt->t[idx].t[i].t);
         sb_inc(sb, strlen(sb->data + nl));
 
         sb_addnl(sb);
