@@ -6,6 +6,7 @@
 // Defining here enables the LSP to check the source file.
 // #define SOL_DEF
 
+#include <stddef.h>
 #include <string.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -2330,7 +2331,7 @@ void string_format_backend(char *format_buffer, const char *fmt, va_list args) {
             format_buffer[buf_pos] = fmt[j];
             buf_pos++;
             continue;
-        } else if (fmt[j] == '-') {
+        } else if (fmt[j] == '-' || fmt[j+1] == 0) {
             if (fmt[j+1] == '%') {
                 format_buffer[buf_pos + 0] = fmt[j + 0];
                 format_buffer[buf_pos + 1] = fmt[j + 1];
