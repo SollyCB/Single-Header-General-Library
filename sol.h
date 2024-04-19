@@ -92,8 +92,10 @@ typedef unsigned char uchar;
 #define max32_if_false(eval) (Max_uint32 + (uint32)((eval) != 0))
 #define max8_if_false(eval)  (Max_uint8  +  (uint8)((eval) != 0))
 
-#define max_if(eval) (Max_u64 + !(eval))
-#define zero_if(eval) (Max_u64 + (eval))
+#define max_if(eval) (!(eval) - 1)
+#define zero_if(eval) ((eval) - 1)
+#define maxif(eval)  (!(eval) - 1)
+#define zeroif(eval)  ((eval) - 1)
 
 struct mem_req {
     size_t size;
@@ -801,8 +803,8 @@ static inline double ascii_to_double(const char *data) {
 
 #define ALLOCATOR_ALIGNMENT 16
 
-#define alloc_align(sz) align(sz, ALLOCATOR_ALIGNMENT)
-#define alloc_align_type(t) align(sizeof(t), ALLOCATOR_ALIGNMENT)
+#define allocalign(sz) align(sz, ALLOCATOR_ALIGNMENT)
+#define allocalign_type(t) align(sizeof(t), ALLOCATOR_ALIGNMENT)
 
 struct allocation {
     void *data;
