@@ -25,6 +25,7 @@
 #include <unistd.h>
 #include <sys/types.h>
 #include <sys/stat.h>
+#include <sys/mman.h>
 
 #define SOL_THREAD
 
@@ -811,29 +812,50 @@ struct allocation {
     size_t size;
 };
 
-typedef struct {
+typedef struct heap_allocator {
     uint64 cap;
     uint64 used;
     uint8 *mem;
     void *tlsf_handle;
 } heap_allocator;
 
-typedef struct {
+typedef struct linear_allocator {
     uint64 cap;
     uint64 used;
     uint8 *mem;
 } linear_allocator;
 
-typedef enum {
-    ALLOCATOR_HEAP_BIT        = 0x01,
-    ALLOCATOR_LINEAR_BIT      = 0x02,
-    ALLOCATOR_DO_NOT_FREE_BIT = 0x04,
+#define ARENA_FOOTER_CHECK_BYTES 0xfeedbeef
 
-    ALLOCATOR_TYPE_BITS = ALLOCATOR_HEAP_BIT | ALLOCATOR_LINEAR_BIT,
+struct arena_footer {
+    uint check_bytes;
+    uint allocation_count;
+    size_t used;
+    size_t cap;
+    void *base;
+    struct arena_footer *next;
+};
+
+typedef struct arena_allocator {
+    struct arena_footer *tail;
+    struct arena_footer *head;
+    size_t max_total_size;
+    size_t min_block_size;
+} arena_allocator;
+
+typedef enum {
+    ALLOCATOR_HEAP_BIT        = 0x001,
+    ALLOCATOR_LINEAR_BIT      = 0x002,
+    ALLOCATOR_ARENA_BIT       = 0x004,
+    ALLOCATOR_DO_NOT_FREE_BIT = 0x100,
+
+    ALLOCATOR_TYPE_BITS = ALLOCATOR_HEAP_BIT | ALLOCATOR_LINEAR_BIT | ALLOCATOR_ARENA_BIT,
 } allocator_flag_bits;
 
-typedef struct allocator allocator;
+// @Todo new_allocator should not return by value, I just realised how big
+// allocator is with all the function pointers.
 
+typedef struct allocator allocator;
 struct allocator {
     uint32 flags;
     void* (*fpn_allocate)(allocator*, size_t);
@@ -846,20 +868,29 @@ struct allocator {
     union {
         heap_allocator heap;
         linear_allocator linear;
+        arena_allocator arena;
     };
 };
 
 #ifdef SOL_ALLOC
-// Leave 'buffer' null to allocate cap from standard allocator.
-allocator new_allocator(size_t cap, void *buffer, allocator_flag_bits type);
+// @Deprecated
+// allocator new_allocator(size_t cap, void *buffer, allocator_flag_bits type);
+void init_allocator(allocator *alloc, size_t cap, void *buffer, allocator_flag_bits type);
 void free_allocator(allocator *alloc);
 #else
-static inline allocator new_allocator(size_t cap, void *buffer, allocator_flag_bits type) { return (allocator){}; }
+// @Deprecated
+// static inline allocator new_allocator(size_t cap, void *buffer, allocator_flag_bits type) { return (allocator){}; }
+static inline void init_allocator(allocator *alloc, size_t cap, void *buffer, allocator_flag_bits type) {}
 static inline void free_allocator(allocator *alloc) {}
 #endif
 
-#define new_heap_allocator(cap, buffer) new_allocator(cap, buffer, ALLOCATOR_HEAP_BIT)
-#define new_linear_allocator(cap, buffer) new_allocator(cap, buffer, ALLOCATOR_LINEAR_BIT)
+// @Deprecated
+// #define new_heap_allocator(cap, buffer) new_allocator(cap, buffer, ALLOCATOR_HEAP_BIT)
+// #define new_linear_allocator(cap, buffer) new_allocator(cap, buffer, ALLOCATOR_LINEAR_BIT)
+// #define new_arena_allocator(cap) new_allocator(cap, NULL, ALLOCATOR_ARENA_BIT)
+#define init_heap_allocator(alloc, cap, buffer)   init_allocator(alloc, cap, buffer, ALLOCATOR_HEAP_BIT)
+#define init_linear_allocator(alloc, cap, buffer) init_allocator(alloc, cap, buffer, ALLOCATOR_LINEAR_BIT)
+#define init_arena_allocator(alloc, cap)          init_allocator(alloc, cap, NULL, ALLOCATOR_ARENA_BIT)
 
 static inline void *allocate(allocator *alloc, size_t size) {
 #ifdef SOL_ALLOC
@@ -2585,6 +2616,9 @@ struct dir getdir(const char *name, allocator *alloc)
 ////////////////////////////////////////////////////////////////////////////////
 // allocator.c
 
+// @Todo This is one of my oldest files and so has numerous inconsistencies and
+// is rife with ugliness.
+
 #ifdef SOL_ALLOC
 
 static heap_allocator fn_new_heap_allocator(uint64 cap, void *buffer);
@@ -2607,10 +2641,31 @@ static void* realloc_linear_thread_safe(allocator *alloc, void *ptr, uint64 new_
 static void free_allocation_heap_thread_safe(allocator *alloc, void *ptr);
 static void free_allocation_linear_thread_safe(allocator *alloc, void *ptr); // Does nothing
 
+static void init_arena(arena_allocator *alloc, uint min_block_size);
+static void* arena_alloc(arena_allocator *alloc, uint size);
+
+/* return values for unmapping functions:
+     - NULL on success
+     - the footer identifying the block that was being freed to allow for recovery from
+       an error unmapping said block.
+     - 0xcafebabecafebabe if deallocate is passed an address which is not in the address
+       space of the allocator. */
+static struct arena_footer* free_arena(arena_allocator *alloc);
+static struct arena_footer* arena_dealloc(arena_allocator *alloc, void* ptr);
+
+/* @Todo Interface for realloc is not great. I wanted to maintain the typical
+   realloc interface where it returns a pointer, so if the allocation fails,
+   then it returns NULL, but if the free fails, then it returns the footer.
+   Annoying because neither '== 0' nor '!= 0' inidicates error. I could return
+   a (void*)-1 one on allocation fail maybe. Idk. I rarely use realloc directly
+   and when I do I never check the return codes, just let it crash. */
+static void* arena_realloc(arena_allocator *alloc, void *ptr, uint old_size, uint new_size);
+
 static inline void* realloc_heap_with_old_size(allocator *alloc, void *ptr, size_t old_sz, size_t new_sz) {
     return realloc_heap(alloc, ptr, new_sz);
 }
 
+/* @Deprecated
 allocator new_allocator(size_t cap, void *buffer, allocator_flag_bits type)
 {
     allocator ret = (allocator){};
@@ -2644,6 +2699,65 @@ allocator new_allocator(size_t cap, void *buffer, allocator_flag_bits type)
             ret.fpn_deallocate_thread_safe = free_allocation_linear_thread_safe;
             ret.fpn_reallocate_with_old_size = realloc_linear_with_old_size;
             break;
+        case ALLOCATOR_ARENA_BIT:
+            init_arena(&ret.arena, cap, buffer);
+            ret.fpn_allocate = arena_alloc;
+            ret.fpn_deallocate = arena_dealloc;
+            ret.fpn_reallocate_with_old_size = arena_realloc;
+            ret.fpn_reallocate = NULL;
+            ret.fpn_allocate_thread_safe = NULL;
+            ret.fpn_reallocate_thread_safe = NULL;
+            ret.fpn_deallocate_thread_safe = NULL;
+            break;
+        default:
+            assert(false && "Invalid allocator type");
+            break;
+    }
+    return ret;
+}
+*/
+void init_allocator(allocator *alloc, size_t cap, void *buffer, allocator_flag_bits type)
+{
+    alloc->flags = type;
+
+    cap = align(cap, ALLOCATOR_ALIGNMENT);
+
+    if (!buffer)
+        buffer = malloc(cap);
+    else
+        alloc->flags |= ALLOCATOR_DO_NOT_FREE_BIT;
+
+    switch(type) {
+        case ALLOCATOR_HEAP_BIT:
+            alloc->heap = fn_new_heap_allocator(cap, buffer);
+            alloc->fpn_allocate = malloc_heap;
+            alloc->fpn_reallocate = realloc_heap;
+            alloc->fpn_deallocate = free_allocation_heap;
+            alloc->fpn_allocate_thread_safe = malloc_heap_thread_safe;
+            alloc->fpn_reallocate_thread_safe = realloc_heap_thread_safe;
+            alloc->fpn_deallocate_thread_safe = free_allocation_heap_thread_safe;
+            alloc->fpn_reallocate_with_old_size = realloc_heap_with_old_size;
+            break;
+        case ALLOCATOR_LINEAR_BIT:
+            alloc->linear = fn_new_linear_allocator(cap, buffer);
+            alloc->fpn_allocate = malloc_linear;
+            alloc->fpn_reallocate = realloc_linear;
+            alloc->fpn_deallocate = free_allocation_linear;
+            alloc->fpn_allocate_thread_safe = malloc_linear_thread_safe;
+            alloc->fpn_reallocate_thread_safe = realloc_linear_thread_safe;
+            alloc->fpn_deallocate_thread_safe = free_allocation_linear_thread_safe;
+            alloc->fpn_reallocate_with_old_size = realloc_linear_with_old_size;
+            break;
+        case ALLOCATOR_ARENA_BIT:
+            init_arena(&ret->arena, cap, buffer);
+            alloc->fpn_allocate = arena_alloc;
+            alloc->fpn_deallocate = arena_dealloc;
+            alloc->fpn_reallocate_with_old_size = arena_realloc;
+            alloc->fpn_reallocate = NULL;
+            alloc->fpn_allocate_thread_safe = NULL;
+            alloc->fpn_reallocate_thread_safe = NULL;
+            alloc->fpn_deallocate_thread_safe = NULL;
+            break;
         default:
             assert(false && "Invalid allocator type");
             break;
@@ -2661,6 +2775,9 @@ void free_allocator(allocator *alloc)
         break;
     case ALLOCATOR_LINEAR_BIT:
         free_linear_allocator(&alloc->linear);
+        break;
+    case ALLOCATOR_ARENA_BIT:
+        free_arena(&alloc->arena);
         break;
     default:
         break;
@@ -2805,6 +2922,133 @@ static void free_allocation_heap_thread_safe(allocator *alloc, void *ptr)
 }
 
 static void free_allocation_linear_thread_safe(allocator *alloc, void *ptr) { /* Do nothing */ }
+
+// Arena
+static struct arena_footer* arena_add_block(uint size, uint min_size)
+{
+    size += sizeof(struct arena_footer);
+    size = size < min_size ? min_size : align(size, getpagesize());
+    void *data = mmap(NULL, size, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_ANON, -1, 0);
+    if (!data) {
+        log_print_error("Failed to allocate arena block - %s", strerror(errno));
+        return NULL;
+    }
+    size -= sizeof(struct arena_footer);
+    struct arena_footer *ret = (struct arena_footer*)((uchar*)data + size);
+    ret->check_bytes = ARENA_FOOTER_CHECK_BYTES;
+    ret->allocation_count = 0;
+    ret->used = 0;
+    ret->base = data;
+    ret->next = NULL;
+    return ret;
+}
+
+static void init_arena(arena_allocator *alloc, uint min_block_size)
+{
+    alloc->min_block_size = align(min_block_size + sizeof(struct arena_footer), getpagesize());
+    alloc->head = NULL;
+    alloc->tail = NULL;
+}
+
+static struct arena_footer* free_arena(arena_allocator *alloc)
+{
+    uint block_i = 0;
+    do {
+        log_print_error_if(alloc->tail->check_bytes != ARENA_FOOTER_CHECK_BYTES,
+                "block %u has invalid header, check bytes == %uh", block_i, alloc->tail->check_bytes);
+        struct arena_footer *tmp = alloc->tail;
+        alloc->tail = alloc->tail->next;
+        if (munmap(tmp->base, align(tmp->cap + sizeof(struct arena_footer), getpagesize()))) {
+            log_print_error("failed to unmap block %u - arena address %uh, %s",
+                    block_i, alloc, strerror(errno));
+            return tmp;
+        }
+        block_i++;
+    } while(alloc->tail);
+    *alloc = (arena_allocator){};
+    return NULL;
+}
+
+static void* arena_alloc(arena_allocator *alloc, uint size)
+{
+    log_print_error_if(alloc->head && alloc->head->check_bytes != ARENA_FOOTER_CHECK_BYTES,
+                "head has invalid header, check bytes == %uh", alloc->head->check_bytes);
+    if (size == 0)
+        return NULL;
+    size = allocalign(size);
+    if (!alloc->head) {
+        alloc->head = arena_add_block(size, alloc->min_block_size);
+        alloc->tail = alloc->head;
+    } else if(alloc->head->used + size > alloc->head->cap) {
+        struct arena_footer *new_block = arena_add_block(size, alloc->min_block_size);
+        alloc->head->next = new_block;
+        alloc->head = new_block;
+    }
+    void *ret = (uchar*)alloc->head->base + alloc->head->used;
+    alloc->head->used += size;
+    alloc->head->allocation_count++;
+    return ret;
+}
+
+static struct arena_footer* arena_dealloc(arena_allocator *alloc, void* ptr)
+{
+    // Makes the allocator very fast if only using one block. Basically just
+    // a reference counted linear allocator at that point.
+    if (alloc->tail == alloc->head) {
+        log_print_error_if(!(alloc->head->base <= ptr &&
+                            (uchar*)alloc->head->base + alloc->head->used > (uchar*)ptr),
+                            "arena_deallocate was passed an invalid pointer - arena address %uh, pointer %uh", alloc, ptr);
+        alloc->head->allocation_count -= 1;
+        if (!alloc->head->allocation_count)
+            alloc->head->used = 0;
+        return NULL;
+    }
+    struct arena_footer *pos = alloc->tail;
+    struct arena_footer *prev = alloc->tail;
+    uint block_i = 0;
+    while(1) {
+        log_print_error_if(pos->check_bytes != ARENA_FOOTER_CHECK_BYTES,
+                "block %u has invalid header, check bytes == %uh", block_i, pos->check_bytes);
+        if (pos->base <= ptr && (uchar*)pos->base + pos->used > (uchar*)ptr) {
+            break;
+        } else if (!pos->next) {
+            log_print_error("arena_deallocate was passed an invalid pointer - arena address %uh, pointer %uh", alloc, ptr);
+            return (struct arena_footer*)0xcafebabecafebabe;
+        }
+        prev = pos;
+        pos = pos->next;
+        block_i++;
+    }
+    pos->allocation_count -= 1;
+    if (pos->allocation_count)
+        return NULL;
+
+    if (pos == alloc->head) {
+        alloc->head = prev;
+        alloc->head->next = NULL;
+    } else if (pos == alloc->tail) {
+        alloc->tail = pos->next;
+    } else {
+        prev->next = pos->next;
+    }
+    size_t size = pos->cap;
+    if (munmap(pos->base, align(pos->cap + sizeof(struct arena_footer), getpagesize()))) {
+        log_print_error("failed to unmap block %u - arena address %uh, %s",
+                block_i, alloc, strerror(errno));
+        return pos;
+    }
+    return NULL;
+}
+
+static void* arena_realloc(arena_allocator *alloc, void *ptr, uint old_size, uint new_size)
+{
+    void *ret = arena_alloc(alloc, new_size);
+    if (!ret) return NULL;
+    memcpy(ret, ptr, old_size);
+    struct arena_footer *freed = arena_dealloc(alloc, ptr);
+    log_print_error_if(free, "failed to free pointer %uh - arena address %uh", ptr, alloc);
+    return freed ? freed : ret;
+}
 
 #endif
 
@@ -3103,7 +3347,7 @@ void* fn_hash_map_delete_hash(hash_map *map, uint64 hash)
 /*
     Note that the interface for this file is going under some maintenance. The
     actual thread work implementation stuff I am pretty confident in, but there
-    is some poor stuff with return values when freeing pools, for instance. 
+    is some poor stuff with return values when freeing pools, for instance.
 */
 
 static mutex thread_work_queue_locks[THREAD_WORK_QUEUE_COUNT];
