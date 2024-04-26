@@ -873,21 +873,13 @@ struct allocator {
 };
 
 #ifdef SOL_ALLOC
-// @Deprecated
-// allocator new_allocator(size_t cap, void *buffer, allocator_flag_bits type);
 void init_allocator(allocator *alloc, size_t cap, void *buffer, allocator_flag_bits type);
 void free_allocator(allocator *alloc);
 #else
-// @Deprecated
-// static inline allocator new_allocator(size_t cap, void *buffer, allocator_flag_bits type) { return (allocator){}; }
 static inline void init_allocator(allocator *alloc, size_t cap, void *buffer, allocator_flag_bits type) {}
 static inline void free_allocator(allocator *alloc) {}
 #endif
 
-// @Deprecated
-// #define new_heap_allocator(cap, buffer) new_allocator(cap, buffer, ALLOCATOR_HEAP_BIT)
-// #define new_linear_allocator(cap, buffer) new_allocator(cap, buffer, ALLOCATOR_LINEAR_BIT)
-// #define new_arena_allocator(cap) new_allocator(cap, NULL, ALLOCATOR_ARENA_BIT)
 #define init_heap_allocator(alloc, cap, buffer)   init_allocator(alloc, cap, buffer, ALLOCATOR_HEAP_BIT)
 #define init_linear_allocator(alloc, cap, buffer) init_allocator(alloc, cap, buffer, ALLOCATOR_LINEAR_BIT)
 #define init_arena_allocator(alloc, cap)          init_allocator(alloc, cap, NULL, ALLOCATOR_ARENA_BIT)
@@ -2665,57 +2657,6 @@ static inline void* realloc_heap_with_old_size(allocator *alloc, void *ptr, size
     return realloc_heap(alloc, ptr, new_sz);
 }
 
-/* @Deprecated
-allocator new_allocator(size_t cap, void *buffer, allocator_flag_bits type)
-{
-    allocator ret = (allocator){};
-    ret.flags = type;
-
-    cap = align(cap, ALLOCATOR_ALIGNMENT);
-
-    if (!buffer)
-        buffer = malloc(cap);
-    else
-        ret.flags |= ALLOCATOR_DO_NOT_FREE_BIT;
-
-    switch(type) {
-        case ALLOCATOR_HEAP_BIT:
-            ret.heap = fn_new_heap_allocator(cap, buffer);
-            ret.fpn_allocate = malloc_heap;
-            ret.fpn_reallocate = realloc_heap;
-            ret.fpn_deallocate = free_allocation_heap;
-            ret.fpn_allocate_thread_safe = malloc_heap_thread_safe;
-            ret.fpn_reallocate_thread_safe = realloc_heap_thread_safe;
-            ret.fpn_deallocate_thread_safe = free_allocation_heap_thread_safe;
-            ret.fpn_reallocate_with_old_size = realloc_heap_with_old_size;
-            break;
-        case ALLOCATOR_LINEAR_BIT:
-            ret.linear = fn_new_linear_allocator(cap, buffer);
-            ret.fpn_allocate = malloc_linear;
-            ret.fpn_reallocate = realloc_linear;
-            ret.fpn_deallocate = free_allocation_linear;
-            ret.fpn_allocate_thread_safe = malloc_linear_thread_safe;
-            ret.fpn_reallocate_thread_safe = realloc_linear_thread_safe;
-            ret.fpn_deallocate_thread_safe = free_allocation_linear_thread_safe;
-            ret.fpn_reallocate_with_old_size = realloc_linear_with_old_size;
-            break;
-        case ALLOCATOR_ARENA_BIT:
-            init_arena(&ret.arena, cap, buffer);
-            ret.fpn_allocate = arena_alloc;
-            ret.fpn_deallocate = arena_dealloc;
-            ret.fpn_reallocate_with_old_size = arena_realloc;
-            ret.fpn_reallocate = NULL;
-            ret.fpn_allocate_thread_safe = NULL;
-            ret.fpn_reallocate_thread_safe = NULL;
-            ret.fpn_deallocate_thread_safe = NULL;
-            break;
-        default:
-            assert(false && "Invalid allocator type");
-            break;
-    }
-    return ret;
-}
-*/
 void init_allocator(allocator *alloc, size_t cap, void *buffer, allocator_flag_bits type)
 {
     alloc->flags = type;
