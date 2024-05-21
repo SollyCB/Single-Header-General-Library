@@ -1081,6 +1081,37 @@ static inline void proj_matrix(float fov, float a, float n, float f, matrix *m)
     m->m[14] = -(2 * n * f) / (f - n);
 }
 
+// point of intersection of three planes, does not check det == 0
+static inline vector intersect_three_planes(vector l1, vector l2, vector l3)
+{
+    matrix m;
+    vector d = vector3(-l1.w, -l2.w, -l3.w);
+    matrix3(vector3(l1.x, l2.x, l3.x), vector3(l1.y, l2.y, l3.y), vector3(l1.z, l2.z, l3.z), &m);
+
+    invert(&m, &m);
+    return mul_matrix_vector(&m, d);
+}
+
+// find the point of intersection of two planes l1 and l2, q1 and q2 are points on the respective planes
+static inline vector intersect_two_planes_point(vector l1, vector l2, vector q1, vector q2)
+{
+    matrix m;
+    vector v,q,d;
+    float d1,d2;
+
+    d1 = dot(vector3(-l1.x, -l1.y, -l1.z), vector3(q1.x, q1.y, q1.z));
+    d2 = dot(vector3(-l2.x, -l2.y, -l2.z), vector3(q2.x, q2.y, q2.z));
+
+    v = cross(l1, l2);
+    d = vector3(-d1, -d2, 0);
+    matrix3(vector3(l1.x, l2.x, v.x), vector3(l1.y, l2.y, v.y), vector3(l1.z, l2.z, v.z), &m);
+
+    invert(&m, &m);
+    q = mul_matrix_vector(&m, d);
+
+    return add_vector(q, scale_vector(v, -dot(v, q) / dot(v, v)));
+}
+
 ////////////////////////////////////////////////////////////////////////////////
 // ascii.h
 
