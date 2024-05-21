@@ -595,6 +595,22 @@ static inline vector get_vector(float x, float y, float z, float w)
 {
     return (vector) {.x = x, .y = y, .z = z, .w = w};
 }
+#define vector4(x, y, z, w) get_vector(x, y, z, w)
+#define vector3(x, y, z)    get_vector(x, y, z, 0)
+#define vector2(x, y)       get_vector(x, y, 0, 0)
+
+static inline void get_matrix(vector colx, vector coly, vector colz, vector colw, matrix *m)
+{
+    __m128 a = _mm_load_ps(&colx.x);
+    __m128 b = _mm_load_ps(&coly.x);
+    __m128 c = _mm_load_ps(&colz.x);
+    __m128 d = _mm_load_ps(&colw.x);
+    _mm_store_ps(&m->m[ 0], a);
+    _mm_store_ps(&m->m[ 4], b);
+    _mm_store_ps(&m->m[ 8], c);
+    _mm_store_ps(&m->m[12], d);
+}
+#define matrix3(x, y, z, m) get_matrix(x, y, z, (vector){0}, m)
 
 static inline float vector_i(vector v, uint i)
 {
@@ -641,7 +657,7 @@ static inline void set_vector_if(vector *x, vector *y, bool z)
     a = _mm_and_si128(a, c);
     b = _mm_and_si128(b, d);
     a = _mm_add_epi32(a, b);
-    _mm_store_si128((__m128i*)&x, a);
+    _mm_store_si128((__m128i*)x, a);
 }
 
 static inline void array_to_vector(float *arr, vector v)
@@ -683,7 +699,7 @@ static inline vector mul_vector(vector v1, vector v2)
 static inline float dot(vector v1, vector v2)
 {
     vector v3 = mul_vector(v1, v2);
-    return v3.x + v3.y + v3.z;
+    return v3.x + v3.y + v3.z + v3.w;
 }
 
 static inline vector cross(vector p, vector q)
@@ -738,7 +754,7 @@ static inline vector lerp_vector(vector a, vector b, float c) {
 }
 
 // angle in radians
-    static inline vector quaternion(float angle, vector v)
+static inline vector quaternion(float angle, vector v)
 {
     float f = angle/2;
     float sf = sinf(f);
@@ -820,36 +836,36 @@ static inline void count_identity_matrix(uint count, matrix *m)
     }
 }
 
-static inline void scale_matrix(vector *v, matrix *m)
+static inline void scale_matrix(vector v, matrix *m)
 {
     memset(m, 0, sizeof(*m));
-    m->m[0] = v->x;
-    m->m[5] = v->y;
-    m->m[10] = v->z;
+    m->m[0] = v.x;
+    m->m[5] = v.y;
+    m->m[10] = v.z;
     m->m[15] = 1;
 }
 
-static inline void translation_matrix(vector *v, matrix *m)
+static inline void translation_matrix(vector v, matrix *m)
 {
     identity_matrix(m);
-    m->m[12] = v->x;
-    m->m[13] = v->y;
-    m->m[14] = v->z;
+    m->m[12] = v.x;
+    m->m[13] = v.y;
+    m->m[14] = v.z;
 }
 
-static inline void rotation_matrix(vector *r, matrix *m)
+static inline void rotation_matrix(vector r, matrix *m)
 {
-    __m128 a = (__m128)_mm_load_si128((__m128i*)r);
+    __m128 a = _mm_load_ps(&r.x);
     __m128 b = a;
     a = _mm_mul_ps(a,b);
     float *f = (float*)&a;
 
-    float xy = 2 * r->x * r->y;
-    float xz = 2 * r->x * r->z;
-    float yz = 2 * r->y * r->z;
-    float wx = 2 * r->w * r->x;
-    float wy = 2 * r->w * r->y;
-    float wz = 2 * r->w * r->z;
+    float xy = 2 * r.x * r.y;
+    float xz = 2 * r.x * r.z;
+    float yz = 2 * r.y * r.z;
+    float wx = 2 * r.w * r.x;
+    float wy = 2 * r.w * r.y;
+    float wz = 2 * r.w * r.z;
 
     identity_matrix(m);
 
@@ -888,9 +904,9 @@ static inline void mul_matrix(matrix *x, matrix *y, matrix *z)
 static inline void convert_trs(struct trs *trs, matrix *ret)
 {
     matrix t,r,s;
-    translation_matrix(&trs->t, &t);
-    rotation_matrix(&trs->r, &r);
-    scale_matrix(&trs->s, &s);
+    translation_matrix(trs->t, &t);
+    rotation_matrix(trs->r, &r);
+    scale_matrix(trs->s, &s);
     mul_matrix(&t,&r,&r);
     mul_matrix(&r,&s,ret);
 }
@@ -913,28 +929,28 @@ static inline void scalar_mul_matrix(matrix *m, float f)
     m->m[15] = 1;
 }
 
-static inline vector mul_matrix_vector(matrix *m, vector *p)
+static inline vector mul_matrix_vector(matrix *m, vector p)
 {
     __m128 a;
     __m128 b;
     __m128 c;
 
     a = _mm_load_ps(m->m + 0);
-    b = _mm_set1_ps(p->x);
+    b = _mm_set1_ps(p.x);
     c = _mm_mul_ps(a, b);
 
     a = _mm_load_ps(m->m + 4);
-    b = _mm_set1_ps(p->y);
+    b = _mm_set1_ps(p.y);
     a = _mm_mul_ps(a, b);
     c = _mm_add_ps(a, c);
 
     a = _mm_load_ps(m->m + 8);
-    b = _mm_set1_ps(p->z);
+    b = _mm_set1_ps(p.z);
     a = _mm_mul_ps(a, b);
     c = _mm_add_ps(a, c);
 
     a = _mm_load_ps(m->m + 12);
-    b = _mm_set1_ps(p->w);
+    b = _mm_set1_ps(p.w);
     a = _mm_mul_ps(a, b);
     c = _mm_add_ps(a, c);
 
@@ -954,6 +970,79 @@ static inline void transpose(matrix *m)
     copy_matrix(m, &t);
 }
 
+// Inverts a 3x3
+static inline bool invert(matrix *x, matrix *y)
+{
+    float m[3][8] cl_align(16);
+    memset(m, 0, sizeof(m));
+
+    m[0][0] = x->m[0]; m[1][0] = x->m[4]; m[2][0] = x->m[8];
+    m[0][1] = x->m[1]; m[1][1] = x->m[5]; m[2][1] = x->m[9];
+    m[0][2] = x->m[ 2]; m[1][2] = x->m[ 6]; m[2][2] = x->m[10];
+
+    m[0][3] = 1; m[0][4] = 0; m[0][5] = 0;
+    m[1][3] = 0; m[1][4] = 1; m[1][5] = 0;
+    m[2][3] = 0; m[2][4] = 0; m[2][5] = 1;
+
+    __m128 a,b,c,d,e,f,g;
+
+    for(uint j=0; j < 3; ++j) {
+        float max = 0;
+        uint r;
+        for(uint row=j; row < 3; ++row)
+            if (fabs(m[row][j]) > max) {
+                max = fabs(m[row][j]);
+                r = row;
+            }
+
+        if (feq(max, 0))
+            return false;
+
+        a = _mm_load_ps(m[j] + 0);
+        b = _mm_load_ps(m[j] + 4);
+
+        if (r != j) {
+            c = _mm_load_ps(m[r] + 0);
+            d = _mm_load_ps(m[r] + 4);
+            // @Optimise I feel that I can remove half these stores by avoiding
+            // loading the same data later...
+            _mm_store_ps(m[r] + 0, a);
+            _mm_store_ps(m[r] + 4, b);
+            _mm_store_ps(m[j] + 0, c);
+            _mm_store_ps(m[j] + 4, d);
+            a = c;
+            b = d;
+        }
+
+        e = _mm_set1_ps(1 / m[j][j]);
+        a = _mm_mul_ps(a, e);
+        b = _mm_mul_ps(b, e);
+        _mm_store_ps(m[j] + 0, a);
+        _mm_store_ps(m[j] + 4, b);
+
+        for(r=0; r < 3; ++r) {
+            if (r == j)
+                continue;
+
+            e = _mm_set1_ps(-m[r][j]);
+            f = _mm_mul_ps(e, a);
+            g = _mm_mul_ps(e, b);
+            c = _mm_load_ps(m[r] + 0);
+            d = _mm_load_ps(m[r] + 4);
+            c = _mm_add_ps(c, f);
+            d = _mm_add_ps(d, g);
+            _mm_store_ps(m[r] + 0, c);
+            _mm_store_ps(m[r] + 4, d);
+        }
+    }
+
+    matrix3(vector3(m[0][3], m[0][4], m[0][5]),
+            vector3(m[1][3], m[1][4], m[1][5]),
+            vector3(m[2][3], m[2][4], m[2][5]), y);
+
+    return true;
+}
+
 static inline void view_matrix(vector pos, vector fwd, matrix *m)
 {
     vector fo = get_vector(0, 0, 1, 0);
@@ -964,11 +1053,11 @@ static inline void view_matrix(vector pos, vector fwd, matrix *m)
     matrix mr;
     float angle = acosf(dot(fo, fn));
     vector rot = quaternion(angle, ax);
-    rotation_matrix(&rot, &mr);
+    rotation_matrix(rot, &mr);
 
     matrix mt;
     vector vt = get_vector(-pos.x, -pos.y, -pos.z, 0);
-    translation_matrix(&vt, &mt);
+    translation_matrix(vt, &mt);
 
     mul_matrix(&mr, &mt, m);
 }
