@@ -610,7 +610,8 @@ static inline void get_matrix(vector colx, vector coly, vector colz, vector colw
     _mm_store_ps(&m->m[ 8], c);
     _mm_store_ps(&m->m[12], d);
 }
-#define matrix3(x, y, z, m) get_matrix(x, y, z, (vector){0}, m)
+#define matrix3(x, y, z, m)    get_matrix(x, y, z, (vector){0}, m)
+#define matrix4(x, y, z, w, m) get_matrix(x, y, z, w, m)
 
 static inline float vector_i(vector v, uint i)
 {
@@ -644,6 +645,11 @@ static inline void print_matrix(matrix *m)
 static inline void println_vector(vector v)
 {
     print("[%f, %f, %f, %f]\n", v.x, v.y, v.z, v.w);
+}
+
+static inline void print_vector(vector v)
+{
+    print("[%f, %f, %f, %f]", v.x, v.y, v.z, v.w);
 }
 
 static inline void set_vector_if(vector *x, vector *y, bool z)
@@ -769,15 +775,78 @@ static inline vector quaternion(float angle, vector v)
     return r;
 }
 
-// equivalent to applying rotation q2, followed by rotation q1
-static inline vector hamilton_product(vector *q2, vector *q1)
+static inline vector invert_quaternion(vector q)
 {
+    return vector4(-q.x, -q.y, -q.z, q.w);
+}
+
+// equivalent to applying rotation q2, followed by rotation q1
+static inline vector hamilton_product(vector q1, vector q2)
+{
+    #if 0
     return (vector) {
-        .w = q1->w * q2->w - q1->x * q2->x - q1->y * q2->y - q1->z * q2->z,
-        .x = q1->w * q2->x + q1->x * q2->w + q1->y * q2->z - q1->z * q2->y,
-        .y = q1->w * q2->y - q1->x * q2->z + q1->y * q2->w + q1->z * q2->x,
-        .z = q1->w * q2->z + q1->x * q2->y - q1->y * q2->x + q1->z * q2->w,
+        .x = q1.w * q2.x + q1.x * q2.w + q1.y * q2.z - q1.z * q2.y,
+        .y = q1.w * q2.y - q1.x * q2.z + q1.y * q2.w + q1.z * q2.x,
+        .z = q1.w * q2.z + q1.x * q2.y - q1.y * q2.x + q1.z * q2.w,
+        .w = q1.w * q2.w - q1.x * q2.x - q1.y * q2.y - q1.z * q2.z,
     };
+    #endif
+
+    __m128 a,b,c,d,e;
+
+    a = _mm_load_ps(&q2.x);
+
+    b = _mm_set_ps1(q1.w);
+    c = _mm_set_ps1(q1.x);
+    d = _mm_set_ps1(q1.y);
+    e = _mm_set_ps1(q1.z);
+
+    b = _mm_mul_ps(a,b);
+    c = _mm_mul_ps(a,c);
+    d = _mm_mul_ps(a,d);
+    e = _mm_mul_ps(a,e);
+
+    vector x,y,z,w;
+    _mm_store_ps(&w.x, b);
+    _mm_store_ps(&x.x, c);
+    _mm_store_ps(&y.x, d);
+    _mm_store_ps(&z.x, e);
+
+    return (vector) { // @Optimise This could likely be done better, idk.
+        .x = w.x + x.w + y.z - z.y,
+        .y = w.y - x.z + y.w + z.x,
+        .z = w.z + x.y - y.x + z.w,
+        .w = w.w - x.x - y.y - z.z,
+    };
+}
+#define mul_quaternion(p, q) hamilton_product(p, q)
+
+// rotate like the inverse of a rotation matrix (like a view matrix)
+static inline vector rotate_active(vector p, vector q)
+{
+    vector v = hamilton_product(hamilton_product(invert_quaternion(q), p), q);
+    return vector3(v.x, v.y, v.z);
+}
+
+// rotate like a rotation matrix
+static inline vector rotate_passive(vector p, vector q)
+{
+    vector v = hamilton_product(hamilton_product(q, p), invert_quaternion(q));
+    return vector3(v.x, v.y, v.z);
+}
+
+// rotate axis of rotation of p by q
+static inline vector rotate_quaternion_axis(vector p, vector q)
+{
+    vector v = vector3(p.x, p.y, p.z);
+    v = rotate_passive(p, q);
+    return vector4(v.x, v.y, v.z, p.w);
+}
+
+static inline void print_quaternion_axis(vector q)
+{
+    float f = sinf(acosf(q.w));
+    println_vector(vector3(q.x / f, q.y / f, q.z / f));
 }
 
 static inline void copy_matrix(matrix *to, matrix *from)
@@ -1062,10 +1131,16 @@ static inline void view_matrix(vector pos, vector fwd, matrix *m)
     mul_matrix(&mr, &mt, m);
 }
 
-// args: horizontal fov, 1 / aspect ratio, near plane, far plane
-static inline void proj_matrix(float fov, float a, float n, float f, matrix *m)
+static inline float focal_length(float fov)
 {
-    float e = 1 / tanf(fov / 2);
+    return 1 / tanf(fov / 2);
+}
+
+// args: horizontal fov, aspect ratio, near plane, far plane
+static inline void perspective_matrix(float fov, float a, float n, float f, matrix *m)
+{
+    float e = focal_length(fov);
+
     float l = -n / e;
     float r = n / e;
     float t = (a * n) / e;
@@ -1076,9 +1151,29 @@ static inline void proj_matrix(float fov, float a, float n, float f, matrix *m)
     m->m[5] = -(2 * n) / (t - b); // negate because Vulkan - or not?
     m->m[8] = (r + l) / (r - l);
     m->m[9] = (t + b) / (t - b);
-    m->m[10] = -(f + n) / (f - n);
+    m->m[10] = -f / (f - n);
     m->m[11] = -1;
-    m->m[14] = -(2 * n * f) / (f - n);
+    m->m[14] = -(n * f) / (f - n);
+}
+
+static inline void ortho_matrix(float l, float r, float b, float t,
+                                float n, float f, matrix *m)
+{
+    matrix4(vector4(2 / (r-l), 0, 0,  0),
+            vector4(0, 2 / (t-b), 0,  0),
+            vector4(0, 0, -1 / (f-n), 0),
+            vector4(-(r+l) / (r-l), -(t+b) / (t-b), -(f+n) / (2 * (f-n)) + 0.5, 1),
+            m);
+}
+
+static inline vector intersect_line_plane(vector p, vector s, vector v)
+{
+    s.w = 1;
+    v.w = 0;
+    float t = -dot(p, s) / dot(p, v);
+
+    s.w = 0;
+    return add_vector(s, scale_vector(v, t));
 }
 
 // point of intersection of three planes, does not check det == 0
