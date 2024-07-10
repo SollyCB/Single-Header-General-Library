@@ -171,6 +171,10 @@ static inline int max(int x, int y) {
     return x > y ? x : y;
 }
 
+static inline int min(int x, int y) {
+    return x < y ? x : y;
+}
+
 static inline uint inc_and_wrap_no_mod(uint num, uint inc, uint max) {
     return (num+inc) & (max-1);
 }
@@ -702,6 +706,12 @@ static inline vector mul_vector(vector v1, vector v2)
     return r;
 }
 
+static inline float sq_vector(vector v)
+{
+    v = mul_vector(v, v);
+    return v.x + v.y + v.z + v.w;
+}
+
 static inline float dot(vector v1, vector v2)
 {
     vector v3 = mul_vector(v1, v2);
@@ -744,6 +754,7 @@ static inline float magnitude_vector(vector v) {
     float *f = (float*)&a;
     return sqrtf(f[0] + f[1] + f[2]);
 }
+#define vector_len(v) magnitude_vector(v)
 
 static inline vector normalize(vector v) {
     float f = magnitude_vector(v);
@@ -762,6 +773,7 @@ static inline vector lerp_vector(vector a, vector b, float c) {
 // angle in radians
 static inline vector quaternion(float angle, vector v)
 {
+    v = normalize(v);
     float f = angle/2;
     float sf = sinf(f);
     vector r;
@@ -1112,23 +1124,44 @@ static inline bool invert(matrix *x, matrix *y)
     return true;
 }
 
-static inline void view_matrix(vector pos, vector fwd, matrix *m)
+static inline void view_matrix(vector pos, vector dir, vector up, matrix *m)
 {
-    vector fo = get_vector(0, 0, 1, 0);
-    vector fn = normalize(fwd);
-    vector ax = cross(fo, fn);
-    normalize(ax);
+    vector w = normalize(up);
+    vector d = normalize(dir);
+    vector r = normalize(cross(d, w));
+    vector u = normalize(cross(r, d));
 
-    matrix mr;
-    float angle = acosf(dot(fo, fn));
-    vector rot = quaternion(angle, ax);
-    rotation_matrix(rot, &mr);
+    matrix rot;
+    matrix3(vector3(r.x, u.x, -d.x),
+            vector3(r.y, u.y, -d.y),
+            vector3(r.z, u.z, -d.z), &rot);
 
-    matrix mt;
-    vector vt = get_vector(-pos.x, -pos.y, -pos.z, 0);
-    translation_matrix(vt, &mt);
+    rot.m[15] = 1;
 
-    mul_matrix(&mr, &mt, m);
+    matrix trn;
+    translation_matrix(scale_vector(pos, -1), &trn);
+
+    mul_matrix(&rot, &trn, m);
+}
+
+static inline void move_to_camera(vector pos, vector dir, vector up, matrix *m)
+{
+    vector w = normalize(up);
+    vector d = normalize(dir);
+    vector r = normalize(cross(d, w));
+    vector u = normalize(cross(r, d));
+
+    matrix rot;
+    matrix3(vector3( r.x,  r.y,  r.z),
+            vector3( u.x,  u.y,  u.z),
+            vector3(-d.x, -d.y, -d.z), &rot);
+
+    rot.m[15] = 1;
+
+    matrix trn;
+    translation_matrix(pos, &trn);
+
+    mul_matrix(&trn, &rot, m);
 }
 
 static inline float focal_length(float fov)
@@ -1160,10 +1193,28 @@ static inline void ortho_matrix(float l, float r, float b, float t,
                                 float n, float f, matrix *m)
 {
     matrix4(vector4(2 / (r-l), 0, 0,  0),
-            vector4(0, 2 / (t-b), 0,  0),
+            vector4(0, 2 / (t-b), 0,  0), // @Todo invert for vulkan
             vector4(0, 0, -1 / (f-n), 0),
             vector4(-(r+l) / (r-l), -(t+b) / (t-b), -(f+n) / (2 * (f-n)) + 0.5, 1),
             m);
+}
+
+static inline float dist_point_line(vector p, vector s, vector v)
+{
+    float q = sq_vector(sub_vector(p, s));
+    float r = pow(dot(sub_vector(p, s), v), 2);
+    float d = powf(magnitude_vector(v), 2);
+
+    // the sqrtf will nan if this is true because float error gives a negative
+    if (feq(q - r / d, 0))
+        return 0;
+
+    return sqrtf(q - r / d);
+}
+
+static inline bool point_on_line(vector p, vector s, vector v)
+{
+    return feq(dist_point_line(p, s, v), 0);
 }
 
 static inline vector intersect_line_plane(vector p, vector s, vector v)
@@ -2124,16 +2175,27 @@ struct dir {
 };
 
 // @Note breaks on windows?
-static inline uint get_file_parent_dir(const char *file_name, char *buf) {
-    int p = 0;
-    int len = strlen(file_name);
+static inline uint file_dir_name(const char *file_name, char *buf) {
+    uint p = 0;
+    uint len = strlen(file_name);
     for(uint i = 0; i < len; ++i) {
-        if (file_name[i] == '/')
-            p = i;
+        p = file_name[i] == '/' ? i : p;
         buf[i] = file_name[i];
     }
     buf[p+1] = 0;
-    return (uint)p+1;
+    return p+1;
+}
+
+static inline uint file_extension(const char *file_name, char *buf)
+{
+    uint p = 0;
+    uint len = strlen(file_name);
+    for(uint i = 0; i < len; ++i) {
+        buf[p] = file_name[i];
+        p = file_name[i] == '.' ? 0 : p + 1;
+    }
+    buf[p] = 0;
+    return p;
 }
 
 static inline void file_last_modified(const char *path, struct timespec *ts) {
@@ -2149,6 +2211,34 @@ static inline bool has_file_changed(const char *path, struct timespec *then) {
     return now.tv_sec != then->tv_sec || now.tv_nsec != then->tv_nsec;
 }
 
+enum {
+    FO_R = O_RDONLY,
+    FO_W = O_WRONLY,
+    FO_C = O_CREAT,
+};
+#define check_file_result(r) (r != -1)
+#define FILE_READ_ALL Max_u64
+
+int file_open(const char *path, int flags);
+uint64 file_write(int fd, uint64 offset, uint64 count, void *data);
+uint64 file_read(int fd, uint64 offset, uint64 count, void *data);
+bool file_close(int fd);
+
+static inline int64 file_open_write(const char *path, uint64 offset, uint64 count, void *data)
+{
+    int fd = file_open(path, O_WRONLY);
+    file_write(fd, offset, count, data);
+    file_close(fd);
+}
+
+static inline int64 file_open_read(const char *path, uint64 offset, uint64 count, void *data);
+{
+    int fd = file_open(path, O_RDONLY);
+    file_read(fd, offset, count, data);
+    file_close(fd);
+}
+
+// @Deprecated
 struct file file_read_bin_all(const char *file_name, allocator *alloc);
 struct file file_read_char_all(const char *file_name, allocator *alloc);
 void file_read_bin_size(const char *file_name, size_t size, void *buffer);
@@ -3217,6 +3307,44 @@ void string_format_backend(char *format_buffer, const char *fmt, va_list args) {
 ////////////////////////////////////////////////////////////////////////////////
 // file.c
 
+int file_open(const char *path, int flags)
+{
+    if ((flags & (O_RDONLY|O_WRONLY)) == (O_RDONLY|O_WRONLY))
+        flags = (flags & ~(O_RDONLY|O_WRONLY)) | O_RDWR;
+    int e = open(path, flags);
+    log_print_error_if(!check_file_result(e), "failed to open file %s with perms %u: %s", path, flags, strerror(errno));
+    return e;
+}
+
+int file_close(int fd)
+{
+    int e = close(fd);
+    log_print_error_if(!check_file_result(e), "failed to close file %i: %s", fd, strerror(errno));
+}
+
+int64 file_write(int fd, uint64 offset, uint64 count, void *data)
+{
+    int64 sz = pwrite(fd, data, count, offset);
+    log_print_error_if(!check_file_result(sz), "failed to write file %i: %s", path, strerror(errno));
+    log_print_error_if(sz != count,
+            "failed to write all data requested to file %i: requested %u, written %u",
+            fd, count, sz);
+    return sz;
+}
+
+int64 file_read(int fd, uint64 offset, uint64 count, void *data)
+{
+    int64 sz = pread(fd, data, count, offset);
+    log_print_error_if(!check_file_result(sz), "failed to read file %i: %s", path, strerror(errno));
+    log_print_error_if(sz != count && count != FILE_READ_ALL,
+            "failed to read all data requested from file %i: requested %u, written %u",
+            fd, count, sz);
+    return sz;
+}
+
+
+// @Deprecated
+/*--------------------------------------------------------------------------------*/
 struct file file_read_bin_all(const char *file_name, allocator *alloc)
 {
     FILE *f = fopen(file_name, "rb");
