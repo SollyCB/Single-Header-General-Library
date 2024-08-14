@@ -26,6 +26,7 @@
 #include <sys/types.h>
 #include <sys/stat.h>
 #include <sys/mman.h>
+#include <fcntl.h>
 
 #define SOL_THREAD
 
@@ -74,6 +75,15 @@ typedef int16_t  int16;
 typedef uint8_t  uint8;
 typedef int8_t   int8;
 typedef unsigned char uchar;
+
+typedef uint32_t u32;
+typedef int32_t  i32;
+typedef uint64_t u64;
+typedef int64_t  i64;
+typedef uint16_t u16;
+typedef int16_t  i16;
+typedef uint8_t  u8;
+typedef int8_t   i8;
 
 #define asm __asm__
 
@@ -197,6 +207,12 @@ static inline uint32 set_bit_idx(uint32 mask, uint i) {
 
 static inline uint32 clear_bit_idx(uint32 mask, uint i) {
     return mask & ~(1 << i);
+}
+
+static inline void seq16(uint count, uint16 *buf)
+{
+    for(uint i=0; i < count; ++i)
+        buf[i] = i;
 }
 
 // This function is useful sometimes, such as for low level string building,
@@ -855,6 +871,21 @@ static inline vector rotate_quaternion_axis(vector p, vector q)
     return vector4(v.x, v.y, v.z, p.w);
 }
 
+static inline float quaternion_angle(vector q)
+{
+    return acosf(q.w) * 2;
+}
+
+static inline vector quaternion_axis(vector q)
+{
+    float a = quaternion_angle(q);
+    if (!a)
+        return vector3(0, 0, 0);
+    vector r = scalar_div_vector(q, sinf(a/2));
+    r.w = 0;
+    return r;
+}
+
 static inline void print_quaternion_axis(vector q)
 {
     float f = sinf(acosf(q.w));
@@ -1122,6 +1153,17 @@ static inline bool invert(matrix *x, matrix *y)
             vector3(m[2][3], m[2][4], m[2][5]), y);
 
     return true;
+}
+
+static inline void invert_transform(matrix *m, matrix *r)
+{
+    matrix t;
+    invert(m, &t);
+    t.m[12] = -m->m[12];
+    t.m[13] = -m->m[13];
+    t.m[14] = -m->m[14];
+    t.m[15] = 1;
+    *r = t;
 }
 
 static inline void view_matrix(vector pos, vector dir, vector up, matrix *m)
@@ -1605,13 +1647,6 @@ struct allocation {
     void *data;
     size_t size;
 };
-
-typedef struct heap_allocator {
-    uint64 cap;
-    uint64 used;
-    uint8 *mem;
-    void *tlsf_handle;
-} heap_allocator;
 
 typedef struct linear_allocator {
     uint64 cap;
@@ -2211,6 +2246,13 @@ static inline bool has_file_changed(const char *path, struct timespec *then) {
     return now.tv_sec != then->tv_sec || now.tv_nsec != then->tv_nsec;
 }
 
+static inline bool file_resize(int fd, uint64 sz)
+{
+    int e = ftruncate(fd, sz);
+    log_print_error_if(e == -1, "failed to resize file %i: %s", fd, strerror(errno));
+    return e != -1;
+}
+
 enum {
     FO_R = O_RDONLY,
     FO_W = O_WRONLY,
@@ -2220,8 +2262,8 @@ enum {
 #define FILE_READ_ALL Max_u64
 
 int file_open(const char *path, int flags);
-uint64 file_write(int fd, uint64 offset, uint64 count, void *data);
-uint64 file_read(int fd, uint64 offset, uint64 count, void *data);
+int64 file_write(int fd, uint64 offset, uint64 count, void *data);
+int64 file_read(int fd, uint64 offset, uint64 count, void *data);
 bool file_close(int fd);
 
 static inline int64 file_open_write(const char *path, uint64 offset, uint64 count, void *data)
@@ -2231,11 +2273,16 @@ static inline int64 file_open_write(const char *path, uint64 offset, uint64 coun
     file_close(fd);
 }
 
-static inline int64 file_open_read(const char *path, uint64 offset, uint64 count, void *data);
+static inline int64 file_open_read(const char *path, uint64 offset, uint64 count, void *data)
 {
     int fd = file_open(path, O_RDONLY);
     file_read(fd, offset, count, data);
     file_close(fd);
+}
+
+static inline int64 file_read_all(const char *path, void *data)
+{
+    return file_open_read(path, 0, FILE_READ_ALL, data);
 }
 
 // @Deprecated
@@ -2252,7 +2299,7 @@ void file_append_char(const char *file_name, size_t count, const char *data);
 struct dir getdir(const char *name, allocator *alloc);
 
 ////////////////////////////////////////////////////////////////////////////////
-// hashmap.h
+// dictionary.h
 
 /*
                                                ** BEGIN WYHASH **
@@ -2490,97 +2537,49 @@ OTHER DEALINGS IN THE SOFTWARE.
 For more information, please refer to <http://unlicense.org/>
 */
 
-#define HASH_MAP_FULL        0b01111111
-#define HASH_MAP_EMPTY       0b11111111
-#define HASH_MAP_DELETED     0b10000000
-#define HASH_MAP_GROUP_WIDTH 16
+enum {
+    DICT_RESIZE = 0x01,
+};
 
-typedef struct {
-    int cap;
-    int remaining;
-    int kv_stride;
-    uint8 *data;
-    bool resize;
+typedef struct dictionary {
+    u16        width;
+    u16        flags;
+    u32        cap;
+    u32        rem;
+    void      *data;
     allocator *alloc;
-} hash_map;
+} dictionary;
 
-bool  fn_hash_map_insert_hash(hash_map *map, uint64 hash, void *elem, int elem_width);
-void  fn_hash_map_if_full(hash_map *map, int elem_width);
-void* fn_hash_map_find_hash(hash_map *map, uint64 hash);
-void* fn_hash_map_delete_hash(hash_map *map, uint64 hash);
+typedef struct dict_iter {
+    dictionary *dict;
+    u32      i;
+} dict_iter;
 
-                        /* Frontend Functions */
-static inline uint64 get_hash(int byte_len, void *bytes) {
-    return wyhash(bytes, byte_len, 0, _wyp);
+struct dict_kv {
+    u64   key;
+    void *val;
+};
+
+// dictionary will resize itself when 7/8ths full, take this into account when setting cap
+void           new_dict_fn(u32 cap, u16 width, u16 flags, allocator *alloc, dictionary *dict);
+dict_iter      new_dict_iter(dictionary *dict);
+struct dict_kv dict_add_hash(dictionary *dict, u64 hash, void *value);
+struct dict_kv dict_iter_next(dict_iter *it);
+struct dict_kv dict_find_hash(dictionary *dict, u64 hash);
+
+// dictionary will resize itself when 7/8ths full, take this into account when setting cap
+#define new_dict(cap, type, flags, alloc, dict) new_dict_fn(cap, sizeof(type), flags, alloc, dict)
+
+struct dict_kv dict_add(dictionary *dict, string key, void *value)
+{
+    u64 hash = hash_bytes(key.len, (void*)key.cstr);
+    return dict_add_hash(dict, hash, value);
 }
-
-static inline hash_map fn_new_hash_map(int cap, int elem_width, bool resize, allocator *alloc) {
-    hash_map ret  = {};
-    ret.cap       = align(cap, 16);
-    ret.remaining = ((cap + 1) / 8) * 7;
-    ret.kv_stride = align(8 + elem_width, 16);
-    ret.data      = allocate(alloc, ret.cap + ret.cap * ret.kv_stride);
-    ret.alloc = alloc;
-    ret.resize = resize;
-    memset(ret.data, HASH_MAP_EMPTY, ret.cap);
-    return ret;
+struct dict_kv dict_find(dictionary *dict, string key)
+{
+    u64 hash = hash_bytes(key.len, (void*)key.cstr);
+    return dict_find_hash(dict, hash);
 }
-
-static inline void fn_free_hash_map(hash_map *map) {
-    deallocate(map->alloc, map->data);
-}
-
-static inline bool fn_hash_map_insert(hash_map *map, int byte_len, void *key, void *elem, int elem_width) {
-    if (map->remaining == 0)
-        fn_hash_map_if_full(map, elem_width);
-
-    uint64 hash = wyhash(key, byte_len, 0, _wyp);
-    return fn_hash_map_insert_hash(map, hash, elem, elem_width);
-}
-static inline bool fn_hash_map_insert_str(hash_map *map, const char *key, void *elem, int elem_width) {
-    if (map->remaining == 0)
-        fn_hash_map_if_full(map, elem_width);
-
-    uint64 hash = wyhash(key, strlen(key), 0, _wyp);
-    return fn_hash_map_insert_hash(map, hash, elem, elem_width);
-}
-
-static inline void* fn_hash_map_find(hash_map *map, int byte_len, void *bytes) {
-    uint64 hash = wyhash(bytes, byte_len, 0, _wyp);
-    return fn_hash_map_find_hash(map, hash);
-}
-static inline void* fn_hash_map_find_str(hash_map *map, const char* key) {
-    uint64 hash = wyhash(key, strlen(key), 0, _wyp);
-    return fn_hash_map_find_hash(map, hash);
-}
-
-static inline void* fn_hash_map_delete(hash_map *map, int byte_len, void *bytes) {
-    uint64 hash = wyhash(bytes, byte_len, 0, _wyp);
-    return fn_hash_map_delete_hash(map, hash);
-}
-static inline void* fn_hash_map_delete_str(hash_map *map, const char* key) {
-    uint64 hash = wyhash(key, strlen(key), 0, _wyp);
-    return fn_hash_map_delete_hash(map, hash);
-}
-
-                        /* Frontend Macros */
-
-#define new_hashmap(cap, type, alloc) fn_new_hash_map(cap, sizeof(type), true, alloc)
-
-#define new_dynamic_hashmap(cap, type, alloc) fn_new_hash_map(cap, sizeof(type), true, alloc)
-#define new_static_hashmap(cap, type, alloc) fn_new_hash_map(cap, sizeof(type), false, alloc)
-#define free_hashmap(p_map) fn_free_hash_map(p_map)
-
-#define hashmap_insert(p_map, p_key, p_value) fn_hash_map_insert(p_map, sizeof(*(p_key)), p_key, p_value, sizeof(*p_value))
-#define hashmap_insert_str(p_map, str_key, p_value) fn_hash_map_insert_str(p_map, str_key, p_value, sizeof(*p_value))
-
-#define hashmap_find(p_map, p_key) fn_hash_map_find(p_map, sizeof(*(p_key)), p_key)
-#define hashmap_find_str(p_map, str_key) fn_hash_map_find_str(p_map, str_key)
-
-#define find_hash(map, hash) fn_hash_map_find_hash(map, hash)
-
-#define hashmap_delete(p_map, p_key) fn_hash_map_delete(p_map, sizeof(*(key)), p_key)
-#define hashmap_delete_str(p_map, str_key) fn_hash_map_delete_str(p_map, str_key)
 
 ////////////////////////////////////////////////////////////////////////////////
 // thread.h
@@ -3316,16 +3315,17 @@ int file_open(const char *path, int flags)
     return e;
 }
 
-int file_close(int fd)
+bool file_close(int fd)
 {
     int e = close(fd);
     log_print_error_if(!check_file_result(e), "failed to close file %i: %s", fd, strerror(errno));
+    return check_file_result(e);
 }
 
 int64 file_write(int fd, uint64 offset, uint64 count, void *data)
 {
     int64 sz = pwrite(fd, data, count, offset);
-    log_print_error_if(!check_file_result(sz), "failed to write file %i: %s", path, strerror(errno));
+    log_print_error_if(!check_file_result(sz), "failed to write file %i: %s", fd, strerror(errno));
     log_print_error_if(sz != count,
             "failed to write all data requested to file %i: requested %u, written %u",
             fd, count, sz);
@@ -3335,7 +3335,7 @@ int64 file_write(int fd, uint64 offset, uint64 count, void *data)
 int64 file_read(int fd, uint64 offset, uint64 count, void *data)
 {
     int64 sz = pread(fd, data, count, offset);
-    log_print_error_if(!check_file_result(sz), "failed to read file %i: %s", path, strerror(errno));
+    log_print_error_if(!check_file_result(sz), "failed to read file %i: %s", fd, strerror(errno));
     log_print_error_if(sz != count && count != FILE_READ_ALL,
             "failed to read all data requested from file %i: requested %u, written %u",
             fd, count, sz);
@@ -3959,164 +3959,139 @@ string_array str_split(string *str, char split_char, allocator *alloc)
 ////////////////////////////////////////////////////////////////////////////////
 // hashmap.c
 
-bool fn_hash_map_insert_hash(hash_map *map, uint64 hash, void *elem, int elem_width)
+// dictionary will resize itself when 7/8ths full, take this into account when setting cap
+void new_dict_fn(u32 cap, u16 width, u16 flags, allocator *alloc, dictionary *h)
 {
-    int g_idx = (hash & (map->cap - 1));
-    g_idx    -= g_idx & 15;
+    assert(cap % 16 == 0 && "cap must be a multiple of 16");
+    h->width = width;
+    h->flags = flags;
+    h->cap   = cap;
+    h->rem   = cap / 8 * 7;
+    h->alloc = alloc;
+    h->data  = allocate(alloc, (align(width, 8) + 8 + 1) * cap);
+}
 
-    uint8  *data   = map->data;
-    int  cap    = map->cap;
-    int  stride = map->kv_stride;
+dict_iter new_dict_iter(dictionary *dict)
+{
+    dict_iter it;
+    it.dict = dict;
+    it.i = 0;
+    return it;
+}
 
-    int  tz;
-    uint16  mask;
-    uint64 *phash;
+struct dict_kv dict_iter_next(dict_iter *it)
+{
+    struct dict_kv ret = {};
 
-    __m128i a;
-    int inc = 0;
-    while(inc < cap) {
-        a    = _mm_load_si128((__m128i*)(data + g_idx));
+    __m128i a = _mm_load_si128((__m128i*)((u8*)it->dict->data + it->i - (it->i % 16)));
+    u16  mask = _mm_movemask_epi8(a) >> (it->i % 16);
+
+    while(!mask) {
+        it->i = align(it->i+1, 16);
+
+        if (it->i >= it->dict->cap)
+            return ret;
+
+        a    = _mm_load_si128((__m128i*)((u8*)it->dict->data + it->i));
         mask = _mm_movemask_epi8(a);
+    }
+    it->i += ctz16(mask); // groups fill up from i=0, but some might have been deleted
+
+    ret.key = *(u64*)((u8*)it->dict->data + it->dict->cap + (align(it->dict->width, 8) + 8) * it->i);
+    ret.val = (u8*)it->dict->data + it->dict->cap + (align(it->dict->width, 8) + 8) * it->i + 8, it->dict->width;
+
+    it->i += 1;
+
+    return ret;
+}
+
+void dict_expand(dictionary *dict)
+{
+    dictionary old = *dict;
+    new_dict_fn(dict->cap * 2, dict->width, dict->flags, dict->alloc, dict);
+
+    dict_iter iter = new_dict_iter(&old);
+    while(1) {
+        struct dict_kv it = dict_iter_next(&iter);
+
+        if (!it.val)
+            break;
+
+        dict_add_hash(dict, it.key, it.val);
+    }
+}
+
+enum {
+    DICT_FULL  = 0b10000000,
+    DICT_EMPTY = 0b00000000,
+};
+
+struct dict_kv dict_add_hash(dictionary *dict, u64 hash, void *value)
+{
+    if (!dict->rem) {
+        if (!(dict->flags & DICT_RESIZE))
+            assert(false && "hash map overflowed: no slots remaining but resize flag not set");
+        dict_expand(dict);
+    }
+
+    u8 *g   = dict->data;
+    u32 i   = (hash % dict->cap) - ((hash % dict->cap) % 16);
+    u32 inc = 16;
+    while(inc < dict->cap) {
+        __m128i a = _mm_load_si128((__m128i*)(g + i));
+        u16  mask = ~_mm_movemask_epi8(a);
 
         if (!mask) {
-            inc   += 16;
-            g_idx += inc;
-            g_idx &= cap - 1;
+            i    = (i+inc) % dict->cap;
+            inc += 16;
             continue;
-        } else {
-            tz = ctz16(mask);
-
-            uint8 top7 = (hash >> 57) & HASH_MAP_FULL;
-            data[g_idx + tz] = 0x0 | top7;
-
-            phash  = (uint64*)(data + cap + (stride * (tz + g_idx)));
-           *phash  =  hash;
-            memcpy(data + cap + (stride * (tz + g_idx)) + 8, elem, elem_width);
-
-            map->remaining -= 1;
-            return true;
         }
+
+        u32 w   =  align(dict->width, 8) + 8;
+        u32 tz  =  ctz16(mask) & maxif(mask);
+        g[i+tz] = (hash >> 57) | DICT_FULL;
+
+        memcpy(g + dict->cap + (w * (i + tz)) + 0, &hash, 8);
+        memcpy(g + dict->cap + (w * (i + tz)) + 8, value, dict->width);
+        dict->rem -= 1;
+
+        struct dict_kv kv;
+        kv.key = hash;
+        kv.val = g + dict->cap + (w * (i + tz)) + 8;
+        return kv;
     }
-    return false;
+
+    assert(false && "failed to add hash");
+    return (struct dict_kv) {};
 }
 
-void fn_hash_map_if_full(hash_map *map, int elem_width)
+struct dict_kv dict_find_hash(dictionary *dict, u64 hash)
 {
-    assert(map->cap * 2 > map->cap && "mul overflow");
-    log_print_error_if(!map->resize, "hash map overflow but resize is false");
+    u32 i     = (hash % dict->cap) - ((hash % dict->cap) % 16);
+    u8  top7  = (hash >> 57) | DICT_FULL;
+    __m128i a = _mm_set1_epi8(top7);
 
-    uint8 *old_data = map->data;
-    int old_cap  = map->cap;
+    for(u32 inc = 16; inc < dict->cap; inc += 16) {
+        __m128i b = _mm_load_si128((__m128i*)((u8*)dict->data + i));
+        __m128i c = _mm_cmpeq_epi8(a, b);
+        u16  mask = _mm_movemask_epi8(c);
+        u32  pc   = popcnt16(mask);
+        for(u32 j=0; j < pc; ++j) {
+            u32 tz = ctz16(mask);
+            mask &= ~(1<<tz);
 
-    map->cap      *= 2;
-    map->data      = allocate(map->alloc, map->cap + map->cap * map->kv_stride);
-    map->remaining = ((map->cap + 1) / 8) * 7;
+            u64 h = *(u64*)((u8*)dict->data + dict->cap + (align(dict->width, 8) + 8) * (i + tz));
+            if (h != hash)
+                continue;
 
-    memset(map->data, HASH_MAP_EMPTY, map->cap);
-
-    int stride = map->kv_stride;
-
-    int  pc;
-    int  tz;
-    uint16  mask;
-    uint64 *phash;
-
-    __m128i a;
-    for(int i = 0; i < old_cap; i += 16) {
-        a    = _mm_load_si128((__m128i*)(old_data + i));
-        mask = ~(_mm_movemask_epi8(a));
-
-        pc = pop_count16(mask);
-        for(int j = 0; j < pc; ++j) {
-            tz    = ctz16(mask);
-            mask ^= 1 << tz;
-
-            phash = (uint64*)(old_data + old_cap + (stride * (tz + i)));
-            assert(fn_hash_map_insert_hash(map, *phash, (uint8*)phash + 8, elem_width) && "hash map grow failure");
+            struct dict_kv kv;
+            kv.key = h;
+            kv.val = (u8*)dict->data + dict->cap + (align(dict->width, 8) + 8) * (i + tz) + 8;
+            return kv;
         }
+        i = (i+inc) % dict->cap;
     }
-    free(old_data);
-}
-void* fn_hash_map_find_hash(hash_map *map, uint64 hash)
-{
-    uint8 top7   = (hash >> 57) & HASH_MAP_FULL;
-    int g_idx = hash & (map->cap - 1);
-    g_idx -= g_idx & 15;
-
-    uint8 *data   = map->data;
-    int stride = map->kv_stride;
-    int cap    = map->cap;
-
-    int  pc;
-    int  tz;
-    uint16  mask;
-    uint64 *phash;
-
-    __m128i a;
-    __m128i b = _mm_set1_epi8(top7);
-
-    int inc = 0;
-    while(inc < cap) {
-        a    = _mm_load_si128((__m128i*)(data + g_idx));
-        a    = _mm_cmpeq_epi8(a, b);
-
-        mask = _mm_movemask_epi8(a);
-        pc   = pop_count16(mask);
-
-        for(int i = 0; i < pc; ++i) {
-            tz    = ctz16(mask);
-            mask ^= 1 << tz;
-            phash = (uint64*)(data + cap + (stride * (tz + g_idx)));
-            if (*phash == hash)
-                return (uint8*)phash + 8;
-        }
-        g_idx += 16;
-        g_idx &= cap - 1;
-        inc   += 16;
-    }
-    return NULL;
-}
-
-void* fn_hash_map_delete_hash(hash_map *map, uint64 hash)
-{
-    uint8 top7   = (hash >> 57) & HASH_MAP_FULL;
-    int g_idx = hash & (map->cap - 1);
-    g_idx    -= g_idx & 15;
-
-    __m128i a;
-    __m128i b = _mm_set1_epi8(top7);
-
-    uint8 *data   = map->data;
-    int stride = map->kv_stride;
-    int cap    = map->cap;
-
-    int  pc;
-    int  tz;
-    uint16  mask;
-    uint64 *phash;
-
-    int inc = 0;
-    while(inc < cap) {
-        a    = _mm_load_si128((__m128i*)(data + g_idx));
-        a    = _mm_cmpeq_epi8(a, b);
-
-        mask = _mm_movemask_epi8(a);
-        pc   = pop_count16(mask);
-
-        for(int i = 0; i < pc; ++i) {
-            tz    = ctz16(mask);
-            mask ^= 1 << tz;
-            phash = (uint64*)(data + cap + (stride * (tz + g_idx)));
-            if (*phash == hash) {
-                data[g_idx + tz] = HASH_MAP_DELETED;
-                return (uint8*)phash + 8;
-            }
-        }
-        g_idx += 16;
-        g_idx &= cap - 1;
-        inc   += 16;
-    }
-    return NULL;
+    return (struct dict_kv) {};
 }
 
 ////////////////////////////////////////////////////////////////////////////////
