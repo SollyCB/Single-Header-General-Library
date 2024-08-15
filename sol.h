@@ -2299,7 +2299,7 @@ void file_append_char(const char *file_name, size_t count, const char *data);
 struct dir getdir(const char *name, allocator *alloc);
 
 ////////////////////////////////////////////////////////////////////////////////
-// dictionary.h
+// dict.h
 
 /*
                                                ** BEGIN WYHASH **
@@ -2560,6 +2560,11 @@ struct dict_kv {
     void *val;
 };
 
+static inline u64 hash_bytes(u32 len, void *data)
+{
+    return wyhash(data, len, 0, _wyp);
+}
+
 // dictionary will resize itself when 7/8ths full, take this into account when setting cap
 void           new_dict_fn(u32 cap, u16 width, u16 flags, allocator *alloc, dictionary *dict);
 dict_iter      new_dict_iter(dictionary *dict);
@@ -2579,6 +2584,61 @@ struct dict_kv dict_find(dictionary *dict, string key)
 {
     u64 hash = hash_bytes(key.len, (void*)key.cstr);
     return dict_find_hash(dict, hash);
+}
+
+#define decl_typed_dict(type, abbrev) \
+\
+typedef struct abbrev ## _dictionary { \
+    u16        width; \
+    u16        flags; \
+    u32        cap; \
+    u32        rem; \
+    type      *data; \
+    allocator *alloc; \
+} abbrev ## _dictionary; \
+\
+typedef struct abbrev ## _dict_iter { \
+    abbrev ## _dictionary *dict; \
+    u32      i; \
+} abbrev ## _dict_iter; \
+ \
+struct abbrev ## _dict_kv { \
+    u64   key; \
+    type *val; \
+}; \
+\
+static inline void new_ ## abbrev ## _dict(u32 cap, u16 flags, allocator *alloc, abbrev ## _dictionary *dict) \
+{ \
+    new_dict_fn(cap, sizeof(*dict->data), flags, alloc, (dictionary*)(void*)dict); \
+} \
+static inline type ## _dict_iter new_ ## abbrev ## _dict_iter(abbrev ## _dictionary *dict) \
+{ \
+    return (abbrev ## _dict_iter)new_ ## abbrev ## _dict_iter((void*)dict); \
+} \
+static inline struct abbrev ## _dict_kv abbrev ## _dict_iter_next(abbrev ## _dict_iter *it) \
+{ \
+    struct dict_kv kv = dict_iter_next((void*)it); \
+    return *(struct abbrev ## _dict_kv*)((void*)&kv); \
+} \
+static inline struct abbrev ## _dict_kv abbrev ## _dict_add_hash(abbrev ## _dictionary *dict, u64 hash, type *value) \
+{ \
+    struct dict_kv kv = dict_add_hash((void*)dict, hash, value); \
+    return *(struct abbrev ## _dict_kv*)((void*)&kv); \
+} \
+static inline struct abbrev ## _dict_kv abbrev ## _dict_find_hash(abbrev ## _dictionary *dict, u64 hash) \
+{ \
+    struct dict_kv kv = dict_find_hash((void*)dict, hash); \
+    return *(struct abbrev ## _dict_kv*)((void*)&kv); \
+} \
+static inline struct abbrev ## _dict_kv abbrev ## _dict_add(abbrev ## _dictionary *dict, string key, type *value) \
+{ \
+    struct dict_kv kv = dict_add((void*)dict, key, value); \
+    return *(struct abbrev ## _dict_kv*)((void*)&kv); \
+} \
+static inline struct abbrev ## _dict_kv abbrev ## _dict_find(abbrev ## _dictionary *dict, string key) \
+{ \
+    struct dict_kv kv = dict_find((void*)dict, key); \
+    return *(struct abbrev ## _dict_kv*)((void*)&kv); \
 }
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -3957,7 +4017,7 @@ string_array str_split(string *str, char split_char, allocator *alloc)
 }
 
 ////////////////////////////////////////////////////////////////////////////////
-// hashmap.c
+// dict.c
 
 // dictionary will resize itself when 7/8ths full, take this into account when setting cap
 void new_dict_fn(u32 cap, u16 width, u16 flags, allocator *alloc, dictionary *h)
@@ -3998,7 +4058,7 @@ struct dict_kv dict_iter_next(dict_iter *it)
     it->i += ctz16(mask); // groups fill up from i=0, but some might have been deleted
 
     ret.key = *(u64*)((u8*)it->dict->data + it->dict->cap + (align(it->dict->width, 8) + 8) * it->i);
-    ret.val = (u8*)it->dict->data + it->dict->cap + (align(it->dict->width, 8) + 8) * it->i + 8, it->dict->width;
+    ret.val = (u8*)it->dict->data + it->dict->cap + (align(it->dict->width, 8) + 8) * it->i + 8;
 
     it->i += 1;
 
