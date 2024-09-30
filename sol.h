@@ -233,7 +233,9 @@ static inline void memcpy_if(void *to, const void *from, size_t size, bool b) {
 #define smemset(to, num, type, count) memset(to, num, sizeof(type) * count)
 #define smemcpy(to, from, type, count) memcpy(to, from, sizeof(type) * count)
 #define smemmove(to, from, type, count) memmove(to, from, sizeof(type) * count)
+#define membsize(t, f) (sizeof(((t*)0)->f))
 #define carrlen(a) (sizeof(a)/sizeof(a[0]))
+#define memblen(t, f) (membsize(t, f)/membsize(t, f[0]))
 #define cstrarrlen(a) ((sizeof(a)/sizeof(a[0])) - 1)
 #define cstr_as_array_len(a) ((sizeof(a)/sizeof(a[0])) - 1)
 
